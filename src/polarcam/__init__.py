@@ -18,7 +18,6 @@ from typing import Callable, Optional
 __app_name__ = "PolarCam"
 __version__ = "0.1.0"
 
-
 def setup_logging(*, verbosity: int = 0, logfile: Optional[str] = None) -> logging.Logger:
     """
     Configure root logger for the app.
