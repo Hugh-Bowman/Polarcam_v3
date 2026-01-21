@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
+import detect_spinners
 from pol_reconstruction import make_qu_reconstructor
 
 
@@ -25,6 +26,27 @@ def _to_gray_u8(frame: np.ndarray) -> np.ndarray:
 
 
 class BasicVideoPlayer:
+    def _show_st2_popup(self, st2_med: np.ndarray):
+        """
+        Pop up a window showing the median S_t^2 image.
+        """
+        try:
+            u8 = detect_spinners.to_u8_preview(st2_med, lo_pct=0.0, hi_pct=100.0)
+        except Exception as e:
+            messagebox.showerror("Spinner detect error", str(e))
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("median(S_t^2) from first 10 frames")
+
+        img = ImageTk.PhotoImage(Image.fromarray(u8, mode="L"))
+        lbl = ttk.Label(win, image=img)
+        lbl.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Keep references so the image doesn't get garbage-collected
+        self._st_popup_img_ref = img
+        self._st_popup_label = lbl
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("AVI Player (single decode + process ALL frames + target display FPS)")
@@ -32,6 +54,13 @@ class BasicVideoPlayer:
         # Single capture (decoded once)
         self.cap = None
         self.video_path = None
+
+        # Spinner detection (first 10 Q/U frames)
+        self._q_buf = []
+        self._u_buf = []
+        self._st_popup_done = False
+        self._st_popup_img_ref = None  # keep PhotoImage alive
+        self._st_popup_label = None
 
         self.frame_count = 0
         self.source_fps = 30.0  # metadata only; display is independent
@@ -59,7 +88,6 @@ class BasicVideoPlayer:
         self.proc_done = 0  # frames processed by recon thread
 
         # Queue: bounded to avoid RAM blow-up, BLOCKING put => no frame drops
-        # (Increase if you want more buffering.)
         self.frame_q = queue.Queue(maxsize=16)
 
         self._build_ui()
@@ -141,6 +169,13 @@ class BasicVideoPlayer:
         self._clear_queue()
         self.stop_event.clear()
 
+        # Reset spinner popup buffers/state (ADDED)
+        self._q_buf = []
+        self._u_buf = []
+        self._st_popup_done = False
+        self._st_popup_img_ref = None
+        self._st_popup_label = None
+
         # Start recon thread (consumes queue, processes EVERY frame)
         H, W = gray0.shape
         self.recon_thread = threading.Thread(target=self._recon_worker, args=((H, W),), daemon=True)
@@ -190,7 +225,6 @@ class BasicVideoPlayer:
                 self._last_display_t = now
 
         # Consider playback finished only when decoding is done
-        # (processing may still be finishing; Q/U percent shows that.)
         if self.decode_done:
             self.playing = False
             self.play_btn.configure(text="Play")
@@ -260,6 +294,13 @@ class BasicVideoPlayer:
         self.restart_btn.configure(state=tk.NORMAL)
         self._last_display_t = 0.0
 
+        # Reset popup state
+        self._q_buf = []
+        self._u_buf = []
+        self._st_popup_done = False
+        self._st_popup_img_ref = None
+        self._st_popup_label = None
+
         self._status_tick()
 
     def _status_tick(self):
@@ -268,7 +309,7 @@ class BasicVideoPlayer:
 
         if self.frame_count > 0:
             pct = 100.0 * (self.proc_done / float(self.frame_count))
-            pct = max(0.0, min(100.0, pct))
+            pct = max(10.0, min(100.0, pct))
         else:
             pct = 0.0
 
@@ -287,13 +328,6 @@ class BasicVideoPlayer:
         self.img_label.configure(image=img)
 
     def _decode_worker(self):
-        """
-        Single decoder: reads each frame once and converts to gray once.
-
-        CRITICAL CHANGE: we BLOCK on queue.put() so that every frame is processed.
-        If recon is slower than decode, decode (and thus "playback progress") will slow down.
-        That's unavoidable if you require processing of every frame.
-        """
         idx = 0
         try:
             while not self.stop_event.is_set() and self.cap is not None:
@@ -333,7 +367,25 @@ class BasicVideoPlayer:
             except queue.Empty:
                 continue
 
-            _Q, _U = recon(gray)  # intentionally unused
+            Q, U = recon(gray)
+
+            # Buffer first 10 Q/U frames, then compute median(S_t^2) and pop up once
+            if (not self._st_popup_done) and (len(self._q_buf) < 10):
+                self._q_buf.append(Q.copy())
+                self._u_buf.append(U.copy())
+
+                if len(self._q_buf) == 10:
+                    try:
+                        Q10 = np.stack(self._q_buf, axis=0)
+                        U10 = np.stack(self._u_buf, axis=0)
+                        st2_med = detect_spinners.median_st2(Q10, U10)
+                    except Exception as e:
+                        self.root.after(0, lambda: messagebox.showerror("Spinner detect error", str(e)))
+                    else:
+                        self._st_popup_done = True
+                        # schedule UI update on main thread
+                        self.root.after(0, lambda arr=st2_med: self._show_st2_popup(arr))
+
             processed += 1
             self.proc_done = processed
 
@@ -346,7 +398,7 @@ class BasicVideoPlayer:
 
     def _stop_workers(self):
         self.stop_event.set()
-        self.decode_done = True  # helps recon thread exit when queue empties
+        self.decode_done = True
 
         if self.decode_thread and self.decode_thread.is_alive():
             self.decode_thread.join(timeout=1.0)
@@ -387,6 +439,12 @@ class BasicVideoPlayer:
         self.status_var.set("No video loaded")
         self.bottom_var.set("")
         self.img_label.configure(image="")
+
+        self._q_buf = []
+        self._u_buf = []
+        self._st_popup_done = False
+        self._st_popup_img_ref = None
+        self._st_popup_label = None
 
     def on_close(self):
         self._close_video()
