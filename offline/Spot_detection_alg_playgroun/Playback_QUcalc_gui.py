@@ -37,7 +37,39 @@ class BasicVideoPlayer:
             return
 
         win = tk.Toplevel(self.root)
-        win.title("median(S_t^2) from first 10 frames")
+        win.title("S_map from first 10 frames")
+
+        img_rgb = Image.fromarray(u8, mode="L").convert("RGB")
+        if centers:
+            draw = ImageDraw.Draw(img_rgb)
+            radius = 6
+            for cx, cy in centers:
+                x0, y0 = cx - radius, cy - radius
+                x1, y1 = cx + radius, cy + radius
+                draw.ellipse([x0, y0, x1, y1], outline=(255, 0, 0), width=2)
+
+        try:
+            out_path = Path.cwd() / "S_map_spots.png"
+            img_rgb.save(out_path)
+        except Exception as e:
+            messagebox.showwarning("Save image warning", f"Could not save S_map image: {e}")
+
+        if self._overlay_base_frame is not None:
+            try:
+                raw_rgb = Image.fromarray(self._overlay_base_frame, mode="L").convert("RGB")
+                if centers:
+                    draw_raw = ImageDraw.Draw(raw_rgb)
+                    radius = 6
+                    for cx, cy in centers:
+                        x0, y0 = cx - radius, cy - radius
+                        x1, y1 = cx + radius, cy + radius
+                        draw_raw.ellipse([x0, y0, x1, y1], outline=(255, 0, 0), width=2)
+                raw_out_path = Path.cwd() / "frame1_spots.png"
+                raw_rgb.save(raw_out_path)
+            except Exception as e:
+                messagebox.showwarning(
+                    "Save image warning", f"Could not save raw frame image: {e}"
+                )
 
         img = ImageTk.PhotoImage(Image.fromarray(u8, mode="L"))
         lbl = ttk.Label(win, image=img)
