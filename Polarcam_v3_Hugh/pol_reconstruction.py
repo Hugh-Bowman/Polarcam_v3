@@ -67,6 +67,69 @@ def make_qu_reconstructor(frame_shape, out_dtype=np.int16):
     return reconstruct
 
 
+def make_xy_reconstructor(
+    frame_shape, eps: float = 1e-6, out_dtype=np.float32, normalize: bool = True
+):
+    """
+    Compute normalized anisotropies per 2x2 superpixel:
+      X = (I0 - I90) / (I0 + I90 + eps)
+      Y = (I45 - I135) / (I45 + I135 + eps)
+
+    Input frame is the raw polarization mosaic (H, W), with:
+      I90  at (0,0), I45 at (0,1), I135 at (1,0), I0 at (1,1) within each 2x2 block.
+
+    Output:
+      X, Y: shape (H/2, W/2), dtype out_dtype.
+    normalize : bool
+      If True (default), divide by the corresponding intensity sum (normalised anisotropy).
+      If False, keep the raw difference (I0-I90, I45-I135) for S-map range metrics.
+    """
+    H, W = frame_shape
+    if (H % 2) != 0 or (W % 2) != 0:
+        raise ValueError(f"Expected even frame shape (H,W), got {(H, W)}")
+
+    ih, iw = H // 2, W // 2
+    X = np.empty((ih, iw), dtype=out_dtype)
+    Y = np.empty((ih, iw), dtype=out_dtype)
+
+    num = np.empty((ih, iw), dtype=np.float32)
+    den = np.empty((ih, iw), dtype=np.float32)
+    eps_f = np.float32(eps)
+    norm_enabled = bool(normalize)
+
+    def reconstruct(I_in):
+        I = np.asarray(I_in)
+        if I.shape != (H, W):
+            raise ValueError(f"Expected frame shape {(H, W)}, got {I.shape}")
+
+        I90 = I[0::2, 0::2]
+        I45 = I[0::2, 1::2]
+        I135 = I[1::2, 0::2]
+        I0 = I[1::2, 1::2]
+
+        # X
+        np.subtract(I0, I90, out=num, dtype=np.float32)
+        if norm_enabled:
+            np.add(I0, I90, out=den, dtype=np.float32)
+            np.add(den, eps_f, out=den)
+            np.divide(num, den, out=X)
+        else:
+            np.copyto(X, num)
+
+        # Y
+        np.subtract(I45, I135, out=num, dtype=np.float32)
+        if norm_enabled:
+            np.add(I45, I135, out=den, dtype=np.float32)
+            np.add(den, eps_f, out=den)
+            np.divide(num, den, out=Y)
+        else:
+            np.copyto(Y, num)
+
+        return X, Y
+
+    return reconstruct
+
+
 # ------------------ Testing speed of polarisation reconstruction prcoess ---------
 # if __name__ == "__main__":
 #     H, W = 1000, 2000
