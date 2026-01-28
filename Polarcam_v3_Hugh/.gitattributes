@@ -1,0 +1,2 @@
+*.npy filter=lfs diff=lfs merge=lfs -text
+offline/Spot_detection_alg_playgroun/outputs/** filter=lfs diff=lfs merge=lfs -text
