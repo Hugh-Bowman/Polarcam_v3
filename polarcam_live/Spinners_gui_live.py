@@ -1,10 +1,13 @@
 # pol_basic_player_min_throttled_display_with_qu_single_decode_process_all.py
 import time
+import json
 import os
 import traceback
 from pathlib import Path
 import threading
 import queue
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional
@@ -742,6 +745,164 @@ class BasicVideoPlayer:
         out = gray_u8.astype(np.float32, copy=False) * inv
         return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
+    def _parse_float(self, text: str) -> Optional[float]:
+        try:
+            return float(str(text).strip())
+        except Exception:
+            return None
+
+    def _parse_int(self, text: str) -> Optional[int]:
+        try:
+            return int(round(float(str(text).strip())))
+        except Exception:
+            return None
+
+    def _sync_fetch_from(self, changed: str) -> None:
+        if getattr(self, "_fetch_sync_lock", False):
+            return
+        self._fetch_sync_lock = True
+        try:
+            fps = self._parse_float(self._fetch_fps_var.get())
+            n_frames = self._parse_int(self._fetch_n_var.get())
+            duration = self._parse_float(self._fetch_dur_var.get())
+
+            if fps is None or fps <= 0.0:
+                return
+
+            if changed == "fps":
+                if n_frames is not None and n_frames > 0:
+                    dur = float(n_frames) / float(fps)
+                    self._fetch_dur_var.set(f"{dur:.4f}")
+            elif changed == "frames":
+                if n_frames is not None and n_frames > 0:
+                    dur = float(n_frames) / float(fps)
+                    self._fetch_dur_var.set(f"{dur:.4f}")
+            elif changed == "duration":
+                if duration is not None and duration >= 0.0:
+                    n = max(1, int(round(float(duration) * float(fps))))
+                    self._fetch_n_var.set(str(n))
+        finally:
+            self._fetch_sync_lock = False
+
+    def _set_fetch_busy(self, busy: bool) -> None:
+        self._fetch_busy = bool(busy)
+        if getattr(self, "_fetch_btn", None) is not None:
+            if busy:
+                self._fetch_btn.state(["disabled"])
+            else:
+                self._fetch_btn.state(["!disabled"])
+                try:
+                    self._fetch_btn.configure(state=tk.NORMAL)
+                except Exception:
+                    pass
+
+    def _capture_frames_to_npy(
+        self,
+        out_path: Path,
+        n_frames: int,
+        fps: Optional[float],
+        exp_ms: Optional[float],
+    ) -> tuple[Path, Optional[float]]:
+        script = Path(__file__).resolve().parent / "fetch_frames.py"
+        out_dir = out_path.parent
+        args = [
+            sys.executable,
+            str(script),
+            "--out-dir",
+            str(out_dir),
+            "--n-frames",
+            str(n_frames),
+            "--stop-after",
+            str(n_frames),
+            "--json",
+        ]
+        if fps is not None:
+            args.extend(["--fps", str(float(fps))])
+        if exp_ms is not None:
+            args.extend(["--exp-ms", str(float(exp_ms))])
+
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(err or "fetch_frames.py failed.")
+
+        payload = (proc.stdout or "").strip().splitlines()
+        if not payload:
+            raise RuntimeError("fetch_frames.py returned no output.")
+        try:
+            data = json.loads(payload[-1])
+            path = Path(str(data.get("path", "")))
+            actual_fps = data.get("actual_fps")
+            actual_fps = float(actual_fps) if actual_fps is not None else None
+        except Exception as e:
+            raise RuntimeError(f"Could not parse fetch_frames output: {e}")
+        if not path.exists():
+            raise RuntimeError("fetch_frames.py did not produce an output file.")
+        return path, actual_fps
+
+
+    def _fetch_frames_worker(self, fps: float, exp_ms: float, n_frames: int) -> None:
+        try:
+            out_dir = Path.cwd() / "frame_runs"
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            out_path = out_dir / f"frame_stack_{ts}.npy"
+            self._ui_call(self.bottom_var.set, f"Fetching {n_frames} frame(s)...")
+            saved_path, actual_fps = self._capture_frames_to_npy(out_path, n_frames, fps, exp_ms)
+        except Exception as e:
+            self._ui_call(messagebox.showerror, "Fetch frames", str(e))
+            self._ui_call(self.bottom_var.set, "Fetch frames failed.")
+        else:
+            def _load_and_start():
+                self._close_video()
+                if self._load_npy_source(str(saved_path)):
+                    use_fps = actual_fps if actual_fps and actual_fps > 0.0 else fps
+                    if use_fps and use_fps > 0.0:
+                        self.source_fps = float(use_fps)
+                        if actual_fps and actual_fps > 0.0:
+                            self._fetch_fps_var.set(f"{float(actual_fps):.3f}")
+                    name = Path(saved_path).name
+                    self.status_var.set(
+                        f"Loaded: {name}  src≈{self.source_fps:.2f}fps  Q/U: 0%"
+                    )
+                    self.bottom_var.set(f"Fetch frames complete: {name}")
+                self._set_fetch_busy(False)
+            self._ui_call(_load_and_start)
+        finally:
+            self._ui_call(self._set_fetch_busy, False)
+
+    def _on_fetch_frames(self) -> None:
+        if getattr(self, "_fetch_busy", False):
+            return
+
+        fps = self._parse_float(self._fetch_fps_var.get())
+        exp_ms = self._parse_float(self._fetch_exp_ms_var.get())
+        n_frames = self._parse_int(self._fetch_n_var.get())
+
+        if fps is None or fps <= 0.0:
+            messagebox.showerror("Fetch frames", "Frame rate must be > 0.")
+            return
+        if exp_ms is None or exp_ms <= 0.0:
+            messagebox.showerror("Fetch frames", "Exposure time must be > 0 ms.")
+            return
+        if n_frames is None or n_frames < 1:
+            messagebox.showerror("Fetch frames", "Number of frames must be >= 1.")
+            return
+
+        # Reset analysis state before fetching a fresh stack.
+        self._close_video()
+        self._set_fetch_busy(True)
+        t = threading.Thread(
+            target=self._fetch_frames_worker,
+            args=(float(fps), float(exp_ms), int(n_frames)),
+            daemon=True,
+        )
+        t.start()
+
     def _on_flat_field_toggle(self) -> None:
         # When toggled, restart analysis for the currently loaded source to keep everything consistent.
         self._flat_field_enabled = bool(self._flat_field_enabled_var.get())
@@ -823,6 +984,18 @@ class BasicVideoPlayer:
         self._flat_inv = None      # float32 (H,W) : scale/profile, zeros where profile==0
         self._flat_profile_path = None
         self._flat_warned_mismatch = False
+        # Fetch-frames controls
+        self._fetch_busy = False
+        self._fetch_sync_lock = False
+        self._fetch_exp_ms_var = tk.StringVar(value="0.05")
+        self._fetch_fps_var = tk.StringVar(value="1000")
+        self._fetch_n_var = tk.StringVar(value="100")
+        self._fetch_dur_var = tk.StringVar(value="")
+        self._fetch_btn = None
+        self._sync_fetch_from("fps")
+        self._fetch_fps_var.trace_add("write", lambda *_: self._sync_fetch_from("fps"))
+        self._fetch_n_var.trace_add("write", lambda *_: self._sync_fetch_from("frames"))
+        self._fetch_dur_var.trace_add("write", lambda *_: self._sync_fetch_from("duration"))
 
         # Single capture (decoded once)
         self.cap = None
@@ -925,6 +1098,16 @@ class BasicVideoPlayer:
         top.pack(side=tk.TOP, fill=tk.X)
 
         ttk.Button(top, text="Select AVI/NPY", command=self.open_video).pack(side=tk.LEFT)
+        self._fetch_btn = ttk.Button(top, text="Fetch frames", command=self._on_fetch_frames)
+        self._fetch_btn.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(top, text="Exp (ms)").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Entry(top, textvariable=self._fetch_exp_ms_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(top, text="FPS").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Entry(top, textvariable=self._fetch_fps_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(top, text="Frames").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Entry(top, textvariable=self._fetch_n_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(top, text="Dur (s)").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Entry(top, textvariable=self._fetch_dur_var, width=8).pack(side=tk.LEFT)
         ttk.Checkbutton(
             top,
             text=f"Flat-field ({self.FLAT_FIELD_FILENAME})",
