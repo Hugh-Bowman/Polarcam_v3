@@ -26,10 +26,13 @@ def _as_uint8(frame16: np.ndarray) -> np.ndarray:
 def fetch_frames(
     out_dir: Path,
     n_frames: int = 100,
-    stop_after: int = 50,
+    stop_after: int | None = 50,
     fps: float | None = None,
     exp_ms: float | None = None,
-) -> Path:
+    roi: tuple[int, int, int, int] | None = None,
+    stop_flag: Path | None = None,
+    out_path: Path | None = None,
+) -> tuple[Path, float | None, int]:
     app = QApplication.instance() or QApplication([])
     controller = Controller()
 
@@ -44,7 +47,7 @@ def fetch_frames(
         frame16 = np.asarray(arr_obj, dtype=np.uint16, copy=True)
         frame8 = _as_uint8(frame16)
         collected.append(frame8)
-        if len(collected) >= stop_after:
+        if stop_after is not None and len(collected) >= stop_after:
             done = True
 
     def _on_timing(payload: object) -> None:
@@ -61,7 +64,11 @@ def fetch_frames(
 
     try:
         controller.open()
-        controller.full_sensor()
+        if roi is None:
+            controller.full_sensor()
+        else:
+            x, y, w, h = roi
+            controller.set_roi(float(w), float(h), float(x), float(y))
         controller.set_timing(fps, exp_ms)
         controller.start()
 
@@ -75,6 +82,8 @@ def fetch_frames(
         while not done:
             app.processEvents()
             sleep(0.002)
+            if stop_flag is not None and stop_flag.exists():
+                done = True
     finally:
         try:
             controller.cam.frame.disconnect(_on_frame)
@@ -98,31 +107,38 @@ def fetch_frames(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = strftime("%Y%m%d-%H%M%S")
-    out_path = out_dir / f"frame_stack_{ts}.npy"
+    if out_path is None:
+        out_path = out_dir / f"frame_stack_{ts}.npy"
     stack = np.stack(collected[:n_frames], axis=0)
     np.save(out_path, stack)
-    return out_path, actual_fps
+    return out_path, actual_fps, int(stack.shape[0])
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch a short burst of frames.")
     parser.add_argument("--out-dir", default="frame_runs", help="Output directory")
     parser.add_argument("--n-frames", type=int, default=100, help="Max frames in stack")
-    parser.add_argument("--stop-after", type=int, default=50, help="Stop acquisition after N frames")
+    parser.add_argument("--stop-after", type=int, default=None, help="Stop acquisition after N frames")
     parser.add_argument("--fps", type=float, default=None, help="Requested frame rate")
     parser.add_argument("--exp-ms", type=float, default=None, help="Exposure time (ms)")
+    parser.add_argument("--roi", type=int, nargs=4, default=None, metavar=("X", "Y", "W", "H"))
+    parser.add_argument("--stop-flag", default=None, help="Path to a stop-flag file")
+    parser.add_argument("--out-path", default=None, help="Exact output .npy path")
     parser.add_argument("--json", action="store_true", help="Emit JSON with path and actual_fps")
     args = parser.parse_args()
 
-    out_path, actual_fps = fetch_frames(
+    out_path, actual_fps, count = fetch_frames(
         Path(args.out_dir),
         n_frames=max(1, int(args.n_frames)),
-        stop_after=max(1, int(args.stop_after)),
+        stop_after=(max(1, int(args.stop_after)) if args.stop_after is not None else None),
         fps=args.fps,
         exp_ms=args.exp_ms,
+        roi=tuple(args.roi) if args.roi else None,
+        stop_flag=Path(args.stop_flag) if args.stop_flag else None,
+        out_path=Path(args.out_path) if args.out_path else None,
     )
     if args.json:
-        print(json.dumps({"path": str(out_path), "actual_fps": actual_fps}))
+        print(json.dumps({"path": str(out_path), "actual_fps": actual_fps, "count": count}))
     else:
         print(str(out_path))
 
