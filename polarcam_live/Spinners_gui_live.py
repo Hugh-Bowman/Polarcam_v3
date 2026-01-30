@@ -1,5 +1,7 @@
 # pol_basic_player_min_throttled_display_with_qu_single_decode_process_all.py
 import time
+import os
+import traceback
 from pathlib import Path
 import threading
 import queue
@@ -19,6 +21,9 @@ except Exception:  # pragma: no cover
     _csd = None
 
 try:
+    mpl_cfg = Path(__file__).resolve().parent / ".mplconfig"
+    mpl_cfg.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_cfg))
     import matplotlib
 
     matplotlib.use("Agg")  # offscreen rendering for Tkinter image labels
@@ -32,20 +37,175 @@ import Detection_alg_offline as detect_spinners
 from pol_reconstruction import make_xy_reconstructor
 
 
-#
-# Camera capture defaults (edit these)
-#
-# NOTE: `exp_ms` is exposure time in milliseconds.
-CAMERA_CAPTURE_DEFAULTS = {
-    "fps": 40.0,
-    "exp_ms": 0.05,  # 0.05 ms = 50 µs
-    "analog_gain": 0.0,   # "no gain" (adjust if your camera uses a different baseline)
-    "digital_gain": 0.0,  # "no gain"
-    "full_fov": True,
-    # If the camera outputs 12-bit packed into uint16, use shift=4 for a raw-ish 8-bit.
-    # Set to None to fall back to `_to_gray_u8`'s heuristic scaling.
-    "u16_to_u8_shift": 4,
-}
+def _welch_fallback(
+    x: np.ndarray,
+    fs: float,
+    nperseg: int,
+    noverlap: int,
+    window: str = "hann",
+    detrend: str = "constant",
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Minimal Welch PSD fallback using NumPy only (two-sided).
+    Returns empty arrays on failure.
+    """
+    x = np.asarray(x)
+    if x.ndim != 1 or nperseg <= 0 or x.size < nperseg:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+
+    fs = float(fs) if fs and fs > 0.0 else 1.0
+    noverlap = int(noverlap) if noverlap is not None else 0
+    step = max(1, int(nperseg) - max(0, noverlap))
+    if step <= 0:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+
+    if window in ("hann", "hanning"):
+        win = np.hanning(nperseg)
+    else:
+        win = np.ones(nperseg, dtype=np.float64)
+
+    scale = fs * float(np.sum(win * win))
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+
+    nseg = 1 + (x.size - nperseg) // step
+    if nseg <= 0:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+
+    acc = None
+    for i in range(nseg):
+        start = i * step
+        seg = x[start : start + nperseg]
+        if detrend == "constant":
+            seg = seg - np.mean(seg)
+        seg = seg * win
+        fft = np.fft.fft(seg, n=nperseg)
+        p = (np.abs(fft) ** 2) / scale
+        acc = p if acc is None else (acc + p)
+
+    psd = acc / float(nseg)
+    freqs = np.fft.fftfreq(nperseg, d=1.0 / fs)
+    return np.asarray(freqs, dtype=np.float64), np.asarray(psd, dtype=np.float64)
+
+
+def _csd_fallback(
+    x: np.ndarray,
+    y: np.ndarray,
+    fs: float,
+    nperseg: int,
+    noverlap: int,
+    window: str = "hann",
+    detrend: str = "constant",
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Minimal cross spectral density fallback using NumPy only (two-sided).
+    Returns empty arrays on failure.
+    """
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if x.ndim != 1 or y.ndim != 1 or x.size < nperseg or y.size < nperseg:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.complex128)
+
+    fs = float(fs) if fs and fs > 0.0 else 1.0
+    noverlap = int(noverlap) if noverlap is not None else 0
+    step = max(1, int(nperseg) - max(0, noverlap))
+    if step <= 0:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.complex128)
+
+    if window in ("hann", "hanning"):
+        win = np.hanning(nperseg)
+    else:
+        win = np.ones(nperseg, dtype=np.float64)
+
+    scale = fs * float(np.sum(win * win))
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+
+    nseg = 1 + (x.size - nperseg) // step
+    if nseg <= 0:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.complex128)
+
+    acc = None
+    for i in range(nseg):
+        start = i * step
+        seg_x = x[start : start + nperseg]
+        seg_y = y[start : start + nperseg]
+        if detrend == "constant":
+            seg_x = seg_x - np.mean(seg_x)
+            seg_y = seg_y - np.mean(seg_y)
+        seg_x = seg_x * win
+        seg_y = seg_y * win
+        fft_x = np.fft.fft(seg_x, n=nperseg)
+        fft_y = np.fft.fft(seg_y, n=nperseg)
+        c = (fft_x * np.conj(fft_y)) / scale
+        acc = c if acc is None else (acc + c)
+
+    pxy = acc / float(nseg)
+    freqs = np.fft.fftfreq(nperseg, d=1.0 / fs)
+    return np.asarray(freqs, dtype=np.float64), np.asarray(pxy, dtype=np.complex128)
+
+
+def _safe_welch(
+    x: np.ndarray,
+    fs: float,
+    nperseg: int,
+    noverlap: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if _welch is not None:
+        try:
+            return _welch(
+                x,
+                fs=fs,
+                window="hann",
+                nperseg=nperseg,
+                noverlap=noverlap,
+                detrend="constant",
+                return_onesided=False,
+                scaling="density",
+            )
+        except Exception:
+            pass
+    return _welch_fallback(
+        x,
+        fs=fs,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        window="hann",
+        detrend="constant",
+    )
+
+
+def _safe_csd(
+    x: np.ndarray,
+    y: np.ndarray,
+    fs: float,
+    nperseg: int,
+    noverlap: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if _csd is not None:
+        try:
+            return _csd(
+                x,
+                y,
+                fs=fs,
+                window="hann",
+                nperseg=nperseg,
+                noverlap=noverlap,
+                detrend="constant",
+                return_onesided=False,
+                scaling="density",
+            )
+        except Exception:
+            pass
+    return _csd_fallback(
+        x,
+        y,
+        fs=fs,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        window="hann",
+        detrend="constant",
+    )
 
 
 def _to_gray_u8(frame: np.ndarray) -> np.ndarray:
@@ -101,33 +261,6 @@ def _to_gray_u8(frame: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(x.astype(np.uint8))
 
 
-def _camera_frame_to_u8(frame: object, *, u16_to_u8_shift: Optional[int]) -> Optional[np.ndarray]:
-    """
-    Convert an incoming camera frame to a contiguous (H,W) uint8 mosaic frame.
-    """
-    if frame is None:
-        return None
-    arr = np.asarray(frame)
-    if arr.ndim == 3:
-        try:
-            arr = cv2.extractChannel(arr, 0)
-        except Exception:
-            arr = arr[..., 0]
-
-    if arr.ndim != 2:
-        return None
-
-    if arr.dtype == np.uint8:
-        return np.ascontiguousarray(arr)
-
-    if u16_to_u8_shift is not None and np.issubdtype(arr.dtype, np.integer):
-        shift = int(max(0, u16_to_u8_shift))
-        a = arr.astype(np.uint16, copy=False)
-        return np.ascontiguousarray((a >> shift).astype(np.uint8, copy=False))
-
-    return _to_gray_u8(arr)
-
-
 class BasicVideoPlayer:
     DEFAULT_RING_SCORE_MIN = 0.0
     MIN_RING_FRAMES = 20
@@ -135,7 +268,7 @@ class BasicVideoPlayer:
     EDGE_EXCLUDE_PX = int(detect_spinners.EDGE_EXCLUDE_PX)
     PLAYBACK_FPS = 20.0
     # Overview S-map display scale. 0.5 is "half-res".
-    S_MAP_DISPLAY_SCALE = 0.6
+    S_MAP_DISPLAY_SCALE = 0.4
     S_MAP_RING_R = 14          # full-res pixels (slightly larger rings for visibility)
     S_MAP_DISPLAY_GAMMA = 1.25  # less aggressive than log; suppresses background noise
     # Directionality analysis
@@ -552,7 +685,7 @@ class BasicVideoPlayer:
             return False
 
         try:
-            prof = np.load(p, allow_pickle=False)
+            prof = np.load(p, allow_pickle=True)
         except Exception as e:
             self._ui_call(messagebox.showerror, "Flat-field", f"Could not load profile: {e}")
             return False
@@ -647,6 +780,7 @@ class BasicVideoPlayer:
         self._play_s_ref = None
         self._dir_psd_ref = None
         self._dir_hand_ref = None
+        self._dir_error_last = None
 
         # Clear all per-spot rendered images (PhotoImage refs keep memory alive in Tk).
         self._spot_img_ref = None
@@ -773,8 +907,6 @@ class BasicVideoPlayer:
         self.decode_thread = None
         self.recon_thread = None
         self.stop_event = threading.Event()
-        self._camera_capture_thread = None
-        self._camera_capture_busy = False
 
         # EOF indicator for decoder
         self.decode_done = False
@@ -785,28 +917,6 @@ class BasicVideoPlayer:
         # Queue: bounded to avoid RAM blow-up, BLOCKING put => no frame drops
         self.frame_q = queue.Queue(maxsize=16)
 
-        # Camera capture UI state
-        self._cam_n_frames_var = tk.StringVar(value="200")
-        self._cam_save_enabled_var = tk.BooleanVar(value=True)
-        self._cam_save_format_var = tk.StringVar(value="npz")  # "npz" | "raw8"
-        self._cam_fps_var = tk.StringVar(value=str(float(CAMERA_CAPTURE_DEFAULTS["fps"])))
-        self._cam_exp_ms_var = tk.StringVar(value=str(float(CAMERA_CAPTURE_DEFAULTS["exp_ms"])))
-        self._cam_analog_gain_var = tk.StringVar(value=str(float(CAMERA_CAPTURE_DEFAULTS["analog_gain"])))
-        self._cam_digital_gain_var = tk.StringVar(value=str(float(CAMERA_CAPTURE_DEFAULTS["digital_gain"])))
-        self._cam_full_fov_var = tk.BooleanVar(value=bool(CAMERA_CAPTURE_DEFAULTS["full_fov"]))
-        shift_default = CAMERA_CAPTURE_DEFAULTS.get("u16_to_u8_shift", None)
-        self._cam_u16_shift_var = tk.StringVar(value="" if shift_default is None else str(int(shift_default)))
-        self._cam_get_btn = None
-        self._cam_n_entry = None
-        self._cam_save_check = None
-        self._cam_fmt_combo = None
-        self._cam_fps_entry = None
-        self._cam_exp_entry = None
-        self._cam_ag_entry = None
-        self._cam_dg_entry = None
-        self._cam_shift_entry = None
-        self._cam_fullfov_check = None
-
         self._build_ui()
         self._start_ui_pump()
 
@@ -815,50 +925,6 @@ class BasicVideoPlayer:
         top.pack(side=tk.TOP, fill=tk.X)
 
         ttk.Button(top, text="Select AVI/NPY", command=self.open_video).pack(side=tk.LEFT)
-
-        # Camera capture controls
-        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
-        cam = ttk.Frame(top)
-        cam.pack(side=tk.LEFT)
-
-        ttk.Label(cam, text="Frames").grid(row=0, column=0, sticky="w")
-        self._cam_n_entry = ttk.Entry(cam, textvariable=self._cam_n_frames_var, width=6)
-        self._cam_n_entry.grid(row=0, column=1, sticky="w", padx=(6, 12))
-
-        ttk.Label(cam, text="FPS").grid(row=0, column=2, sticky="w")
-        self._cam_fps_entry = ttk.Entry(cam, textvariable=self._cam_fps_var, width=6)
-        self._cam_fps_entry.grid(row=0, column=3, sticky="w", padx=(6, 12))
-
-        ttk.Label(cam, text="Exp (ms)").grid(row=0, column=4, sticky="w")
-        self._cam_exp_entry = ttk.Entry(cam, textvariable=self._cam_exp_ms_var, width=6)
-        self._cam_exp_entry.grid(row=0, column=5, sticky="w", padx=(6, 12))
-
-        self._cam_fullfov_check = ttk.Checkbutton(cam, text="Full FOV", variable=self._cam_full_fov_var)
-        self._cam_fullfov_check.grid(row=0, column=6, sticky="w")
-
-        ttk.Label(cam, text="A gain").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self._cam_ag_entry = ttk.Entry(cam, textvariable=self._cam_analog_gain_var, width=6)
-        self._cam_ag_entry.grid(row=1, column=1, sticky="w", padx=(6, 12), pady=(4, 0))
-
-        ttk.Label(cam, text="D gain").grid(row=1, column=2, sticky="w", pady=(4, 0))
-        self._cam_dg_entry = ttk.Entry(cam, textvariable=self._cam_digital_gain_var, width=6)
-        self._cam_dg_entry.grid(row=1, column=3, sticky="w", padx=(6, 12), pady=(4, 0))
-
-        ttk.Label(cam, text="U16>>").grid(row=1, column=4, sticky="w", pady=(4, 0))
-        self._cam_shift_entry = ttk.Entry(cam, textvariable=self._cam_u16_shift_var, width=6)
-        self._cam_shift_entry.grid(row=1, column=5, sticky="w", padx=(6, 12), pady=(4, 0))
-
-        self._cam_save_check = ttk.Checkbutton(cam, text="Save", variable=self._cam_save_enabled_var)
-        self._cam_save_check.grid(row=1, column=6, sticky="w", pady=(4, 0))
-
-        self._cam_fmt_combo = ttk.Combobox(
-            cam, textvariable=self._cam_save_format_var, values=("npz", "raw8"), width=6, state="readonly"
-        )
-        self._cam_fmt_combo.grid(row=1, column=7, sticky="w", padx=(6, 0), pady=(4, 0))
-
-        self._cam_get_btn = ttk.Button(cam, text="Get frames", command=self.get_frames_from_camera)
-        self._cam_get_btn.grid(row=0, column=7, sticky="w", padx=(6, 0))
-
         ttk.Checkbutton(
             top,
             text=f"Flat-field ({self.FLAT_FIELD_FILENAME})",
@@ -959,17 +1025,17 @@ class BasicVideoPlayer:
         self._spot_img_label = ttk.Label(right)
         self._spot_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 10))
 
-        ttk.Label(right, text="Phi FFT").pack(side=tk.TOP, anchor="w")
-        self._fft_img_label = ttk.Label(right)
-        self._fft_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 10))
+        ttk.Label(right, text="X/Y scatter").pack(side=tk.TOP, anchor="w")
+        self._xy_img_label = ttk.Label(right)
+        self._xy_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 10))
 
         ttk.Label(right, text="Phi(t)").pack(side=tk.TOP, anchor="w")
         self._phi_img_label = ttk.Label(right)
         self._phi_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 10))
 
-        ttk.Label(right, text="X/Y scatter").pack(side=tk.TOP, anchor="w")
-        self._xy_img_label = ttk.Label(right)
-        self._xy_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 0))
+        ttk.Label(right, text="Phi FFT").pack(side=tk.TOP, anchor="w")
+        self._fft_img_label = ttk.Label(right)
+        self._fft_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 0))
 
         # Directionality panel (right-most).
         ttk.Label(dir_panel, text="Rotation directionality").pack(side=tk.TOP, anchor="w")
@@ -992,250 +1058,6 @@ class BasicVideoPlayer:
 
         self.bottom_var = tk.StringVar(value="")
         ttk.Label(main, textvariable=self.bottom_var).pack(side=tk.BOTTOM, anchor="w")
-
-    def _set_camera_controls_enabled(self, enabled: bool) -> None:
-        state = tk.NORMAL if enabled else tk.DISABLED
-        for w in (
-            self._cam_get_btn,
-            self._cam_n_entry,
-            self._cam_fps_entry,
-            self._cam_exp_entry,
-            self._cam_ag_entry,
-            self._cam_dg_entry,
-            self._cam_shift_entry,
-            self._cam_save_check,
-            self._cam_fullfov_check,
-        ):
-            if w is None:
-                continue
-            try:
-                w.configure(state=state)
-            except Exception:
-                pass
-
-        if self._cam_fmt_combo is not None:
-            try:
-                self._cam_fmt_combo.configure(state="readonly" if enabled else "disabled")
-            except Exception:
-                pass
-
-    def get_frames_from_camera(self) -> None:
-        """
-        Capture an N-frame burst from the IDS camera and load it into the GUI for processing.
-        """
-        if bool(getattr(self, "_camera_capture_busy", False)):
-            return
-
-        def _parse_float(name: str, s: str) -> float:
-            try:
-                return float(str(s).strip())
-            except Exception:
-                raise ValueError(f"{name} must be a number.")
-
-        try:
-            n_frames = int(str(self._cam_n_frames_var.get()).strip())
-        except Exception:
-            messagebox.showerror("Camera", "Cam frames must be an integer.")
-            return
-        if n_frames < 1:
-            messagebox.showerror("Camera", "Cam frames must be >= 1.")
-            return
-
-        try:
-            fps = _parse_float("FPS", self._cam_fps_var.get())
-            exp_ms = _parse_float("Exposure (ms)", self._cam_exp_ms_var.get())
-            analog_gain = _parse_float("Analog gain", self._cam_analog_gain_var.get())
-            digital_gain = _parse_float("Digital gain", self._cam_digital_gain_var.get())
-        except Exception as e:
-            messagebox.showerror("Camera", str(e))
-            return
-        if fps <= 0.0:
-            messagebox.showerror("Camera", "FPS must be > 0.")
-            return
-        if exp_ms <= 0.0:
-            messagebox.showerror("Camera", "Exposure (ms) must be > 0.")
-            return
-
-        full_fov = bool(self._cam_full_fov_var.get())
-        shift_s = str(self._cam_u16_shift_var.get()).strip()
-        try:
-            u16_to_u8_shift = None if shift_s == "" else int(shift_s)
-        except Exception:
-            messagebox.showerror("Camera", "U16>> shift must be an integer (or blank).")
-            return
-
-        save_enabled = bool(self._cam_save_enabled_var.get())
-        save_fmt = str(self._cam_save_format_var.get() or "npz").strip().lower()
-        if save_fmt not in ("npz", "raw8"):
-            save_fmt = "npz"
-
-        save_path = None
-        if save_enabled:
-            ts = time.strftime("%Y%m%d-%H%M%S")
-            default_name = f"camera_capture_{ts}.{save_fmt if save_fmt != 'raw8' else 'raw'}"
-            filetypes = [("NPZ", "*.npz")] if save_fmt == "npz" else [("RAW (uint8)", "*.raw")]
-            p = filedialog.asksaveasfilename(
-                title="Save captured frames",
-                defaultextension=".npz" if save_fmt == "npz" else ".raw",
-                initialfile=default_name,
-                filetypes=filetypes + [("All files", "*.*")],
-            )
-            if p:
-                save_path = p
-
-        self._camera_capture_busy = True
-        self._set_camera_controls_enabled(False)
-        self.bottom_var.set(f"Capturing {n_frames} frame(s) from camera…")
-
-        def _worker():
-            ctrl = None
-            try:
-                # Lazy import so the GUI still works on machines without camera deps.
-                from Controlling.controller import Controller  # type: ignore
-                from PySide6.QtWidgets import QApplication  # type: ignore
-
-                # Ensure a Qt application exists before constructing any QObject-based facades.
-                app = QApplication.instance()
-                if app is None:
-                    app = QApplication([])
-
-                ctrl = Controller()
-                ctrl.open()
-                if full_fov:
-                    ctrl.full_sensor()
-                ctrl.set_timing(fps=fps, exp_ms=exp_ms)
-                ctrl.set_gains(analog=analog_gain, digital=digital_gain)
-                ctrl.start()
-
-                frames: list[np.ndarray] = []
-                done = False
-
-                cam = getattr(ctrl, "cam", None)
-                frame_sig = getattr(cam, "frame", None)
-                if frame_sig is None or not hasattr(frame_sig, "connect"):
-                    raise RuntimeError("Camera backend does not expose a Qt `frame` signal.")
-
-                def _on_frame(arr_obj: object) -> None:
-                    nonlocal done
-                    if done:
-                        return
-                    u8 = _camera_frame_to_u8(arr_obj, u16_to_u8_shift=u16_to_u8_shift)
-                    if u8 is None:
-                        return
-                    frames.append(u8)
-                    if len(frames) >= n_frames:
-                        done = True
-
-                frame_sig.connect(_on_frame)
-                try:
-                    last_ui = 0.0
-                    t0 = time.time()
-                    fps_eff = float(fps) if fps and fps > 0.0 else 1.0
-                    timeout_s = max(5.0, (float(n_frames) / fps_eff) * 3.0)
-                    while (not done) and (not self.stop_event.is_set()):
-                        app.processEvents()
-                        time.sleep(0.002)
-                        now = time.time()
-                        if (now - t0) > timeout_s:
-                            raise TimeoutError(
-                                f"Timed out waiting for {n_frames} frame(s) "
-                                f"(got {len(frames)} after {timeout_s:.1f}s)."
-                            )
-                        if (now - last_ui) > 0.1:
-                            last_ui = now
-                            self._ui_call(
-                                self.bottom_var.set,
-                                f"Capturing… {len(frames)}/{n_frames}",
-                            )
-                finally:
-                    try:
-                        frame_sig.disconnect(_on_frame)
-                    except Exception:
-                        pass
-
-                if not frames:
-                    raise RuntimeError("No frames captured.")
-
-                stack = np.stack(frames, axis=0).astype(np.uint8, copy=False)
-
-                # Stop camera as soon as frames are ready for processing.
-                try:
-                    ctrl.stop()
-                except Exception:
-                    pass
-                try:
-                    ctrl.close()
-                except Exception:
-                    pass
-
-                # Optional save
-                if save_path:
-                    if save_fmt == "npz":
-                        np.savez_compressed(
-                            save_path,
-                            frames=stack,
-                            fps=np.float32(fps),
-                            exp_ms=np.float32(exp_ms),
-                            analog_gain=np.float32(analog_gain) if analog_gain is not None else np.float32(np.nan),
-                            digital_gain=np.float32(digital_gain) if digital_gain is not None else np.float32(np.nan),
-                            u16_to_u8_shift=np.int32(u16_to_u8_shift) if u16_to_u8_shift is not None else np.int32(-1),
-                        )
-                    else:
-                        raw_path = Path(save_path)
-                        raw_path.write_bytes(stack.tobytes(order="C"))
-                        meta_path = raw_path.with_suffix(raw_path.suffix + ".json")
-                        meta_obj = {
-                            "dtype": "uint8",
-                            "shape": [int(x) for x in stack.shape],
-                            "order": "C",
-                            "fps": float(fps),
-                            "exp_ms": float(exp_ms),
-                            "analog_gain": analog_gain,
-                            "digital_gain": digital_gain,
-                            "u16_to_u8_shift": u16_to_u8_shift,
-                        }
-                        meta_path.write_text(__import__("json").dumps(meta_obj, indent=2))
-
-                label_path = save_path or "Camera capture"
-                self._ui_call(self._load_camera_stack, stack, label_path, fps)
-            except Exception as e:
-                self._ui_call(messagebox.showerror, "Camera capture error", str(e))
-            finally:
-                try:
-                    if ctrl is not None:
-                        ctrl.shutdown()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                self._ui_call(self._on_camera_capture_done)
-
-        self._camera_capture_thread = threading.Thread(target=_worker, daemon=True)
-        self._camera_capture_thread.start()
-
-    def _on_camera_capture_done(self) -> None:
-        self._camera_capture_busy = False
-        self._set_camera_controls_enabled(True)
-
-    def _load_camera_stack(self, stack_u8: np.ndarray, label_path: str, fps: float) -> None:
-        """
-        Load a captured (N,H,W) uint8 stack into the existing NPY pipeline.
-        Runs on the Tk/UI thread.
-        """
-        if stack_u8 is None or stack_u8.ndim != 3:
-            messagebox.showerror("Camera", "Captured stack must be (N,H,W).")
-            return
-
-        self._close_video()
-
-        self.cap = None
-        self.npy_frames = np.ascontiguousarray(stack_u8)
-        self.npy_has_frames_dim = True
-        self.source_kind = "npy"
-        self.video_path = str(label_path)
-        self.frame_count = int(stack_u8.shape[0])
-        self.source_fps = float(fps) if fps and fps > 0.0 else 30.0
-
-        gray0 = stack_u8[0]
-        self._start_after_load(gray0)
 
     def _on_smap_click(self, event) -> None:
         """
@@ -1861,7 +1683,12 @@ class BasicVideoPlayer:
         canvas = FigureCanvas(fig)
         canvas.draw()
         w, h = canvas.get_width_height()
-        buf = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8).reshape((h, w, 3))
+        if hasattr(canvas, "tostring_rgb"):
+            raw = canvas.tostring_rgb()
+            buf = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
+        else:
+            raw = canvas.buffer_rgba()
+            buf = np.asarray(raw, dtype=np.uint8).reshape((h, w, 4))[:, :, :3]
         return Image.fromarray(buf)
 
     def _directionality_metrics(
@@ -1873,10 +1700,8 @@ class BasicVideoPlayer:
           P- = sum_{f<0} PSD(f)
           P+ = sum_{f>0} PSD(f)
         i.e. (-inf..0) and (0..inf) within Welch's available band.
-        Returns None if scipy isn't available or series too short.
+        Returns None if the series is too short or PSD cannot be computed.
         """
-        if _welch is None or _csd is None:
-            return None
         if len(xy_series) < int(self.MIN_DIR_FRAMES):
             return None
 
@@ -1894,18 +1719,11 @@ class BasicVideoPlayer:
             return None
         noverlap = nperseg // 2
 
-        freqs, psd = _welch(
-            z,
-            fs=fs,
-            window="hann",
-            nperseg=nperseg,
-            noverlap=noverlap,
-            detrend="constant",
-            return_onesided=False,
-            scaling="density",
-        )
+        freqs, psd = _safe_welch(z, fs=fs, nperseg=nperseg, noverlap=noverlap)
         freqs = np.asarray(freqs, dtype=np.float64)
         psd = np.asarray(psd, dtype=np.float64)
+        if freqs.size == 0 or psd.size == 0:
+            return None
 
         # Sort by frequency for plotting/band selection.
         order = np.argsort(freqs)
@@ -1930,22 +1748,16 @@ class BasicVideoPlayer:
         b = (p_plus - p_minus) / (p_plus + p_minus + eps)
 
         # Optional handedness spectrum via cross spectral density.
-        freqs_xy, pxy = _csd(
-            x,
-            y,
-            fs=fs,
-            window="hann",
-            nperseg=nperseg,
-            noverlap=noverlap,
-            detrend="constant",
-            return_onesided=False,
-            scaling="density",
-        )
-        freqs_xy = np.asarray(freqs_xy, dtype=np.float64)
-        pxy = np.asarray(pxy, dtype=np.complex128)
-        order2 = np.argsort(freqs_xy)
-        freqs_xy = freqs_xy[order2]
-        hand = np.imag(pxy[order2])
+        try:
+            freqs_xy, pxy = _safe_csd(x, y, fs=fs, nperseg=nperseg, noverlap=noverlap)
+            freqs_xy = np.asarray(freqs_xy, dtype=np.float64)
+            pxy = np.asarray(pxy, dtype=np.complex128)
+            order2 = np.argsort(freqs_xy)
+            freqs_xy = freqs_xy[order2]
+            hand = np.imag(pxy[order2])
+        except Exception:
+            freqs_xy = np.asarray([], dtype=np.float64)
+            hand = np.asarray([], dtype=np.float64)
 
         return {
             "fs": fs,
@@ -1965,10 +1777,8 @@ class BasicVideoPlayer:
     def _directionality_B_only(self, xy_series: list[tuple[float, float]], fps: float) -> Optional[float]:
         """
         Fast directionality score B using only Welch(Z) + two-sided integration.
-        Returns None if insufficient data or scipy missing.
+        Returns None if insufficient data or PSD cannot be computed.
         """
-        if _welch is None:
-            return None
         if len(xy_series) < int(self.MIN_DIR_FRAMES):
             return None
 
@@ -1985,16 +1795,7 @@ class BasicVideoPlayer:
             return None
         noverlap = nperseg // 2
 
-        freqs, psd = _welch(
-            z,
-            fs=fs,
-            window="hann",
-            nperseg=nperseg,
-            noverlap=noverlap,
-            detrend="constant",
-            return_onesided=False,
-            scaling="density",
-        )
+        freqs, psd = _safe_welch(z, fs=fs, nperseg=nperseg, noverlap=noverlap)
         freqs = np.asarray(freqs, dtype=np.float64)
         psd = np.asarray(psd, dtype=np.float64)
         order = np.argsort(freqs)
@@ -2074,10 +1875,18 @@ class BasicVideoPlayer:
             return Image.new("RGB", (300, 220), color=(255, 255, 255))
         fig = Figure(figsize=(3.2, 2.3), dpi=100)
         ax = fig.add_subplot(111)
-        freqs = m["freqs"]
-        psd = m["psd"]
-        f0 = float(m["f0"])
+        freqs = np.asarray(m.get("freqs", []), dtype=np.float64)
+        psd = np.asarray(m.get("psd", []), dtype=np.float64)
+        f0_raw = m.get("f0", None)
+        f0 = float(f0_raw) if f0_raw is not None else None
         b = float(m["B"])
+        if freqs.size == 0 or psd.size == 0:
+            ax.set_title("Two-sided PSD of Z=X+iY  B=n/a  f0=n/a", fontsize=9)
+            ax.set_xlabel("freq (Hz)")
+            ax.set_ylabel("PSD")
+            ax.tick_params(labelsize=8)
+            fig.tight_layout(pad=0.6)
+            return self._mpl_fig_to_image(fig)
         limit_pos = float(m.get("freq_limit_pos", freqs[-1]))
         limit_neg = float(m.get("freq_limit_neg", abs(freqs[0])))
         # Decimate for speed if needed.
@@ -2090,9 +1899,23 @@ class BasicVideoPlayer:
             psd_p = psd
         ax.plot(freqs_p, psd_p, lw=1.0)
         ax.axvline(0.0, color="k", lw=0.8, alpha=0.6)
-        ax.axvspan(0.0, min(limit_pos, freqs[-1]), color="tab:green", alpha=0.15)
-        ax.axvspan(-min(limit_neg, abs(freqs[0])), 0.0, color="tab:green", alpha=0.15)
-        ax.set_title(f"Two-sided PSD of Z=X+iY  B={b:.2f}  f0={abs(f0):.2f}Hz", fontsize=9)
+        span_pos = min(limit_pos, float(freqs[-1]))
+        span_neg = min(limit_neg, float(abs(freqs[0])))
+        if np.isfinite(span_pos) and span_pos > 0.0:
+            try:
+                ax.axvspan(0.0, span_pos, color="tab:green", alpha=0.15)
+            except Exception:
+                pass
+        if np.isfinite(span_neg) and span_neg > 0.0:
+            try:
+                ax.axvspan(-span_neg, 0.0, color="tab:green", alpha=0.15)
+            except Exception:
+                pass
+        if f0 is None:
+            f0_label = "n/a"
+        else:
+            f0_label = f"{abs(f0):.2f}Hz"
+        ax.set_title(f"Two-sided PSD of Z=X+iY  B={b:.2f}  f0={f0_label}", fontsize=9)
         ax.set_xlabel("freq (Hz)")
         ax.set_ylabel("PSD")
         ax.tick_params(labelsize=8)
@@ -2106,6 +1929,13 @@ class BasicVideoPlayer:
         ax = fig.add_subplot(111)
         freqs = m["freqs_xy"]
         hand = m["hand"]
+        if freqs is None or hand is None or len(freqs) == 0 or len(hand) == 0:
+            ax.set_title("Handedness spectrum: Im{CSD(X,Y)}", fontsize=9)
+            ax.set_xlabel("freq (Hz)")
+            ax.set_ylabel("Im(Sxy)")
+            ax.tick_params(labelsize=8)
+            fig.tight_layout(pad=0.6)
+            return self._mpl_fig_to_image(fig)
         if freqs.size > 3000:
             step = int(np.ceil(freqs.size / 3000))
             freqs_p = freqs[::step]
@@ -2338,57 +2168,64 @@ class BasicVideoPlayer:
         self._xy_img_ref = xy_img_tk
 
         # Directionality analysis (unidirectional rotation vs back-and-forth)
-        if _welch is None or _csd is None:
-            self._dir_var.set("B: - (install scipy)")
+        try:
+            if Figure is None or FigureCanvas is None:
+                self._dir_var.set("B: - (install matplotlib)")
+                if hasattr(self, "_dir_psd_label"):
+                    self._dir_psd_label.configure(image="")
+                if hasattr(self, "_dir_hand_label"):
+                    self._dir_hand_label.configure(image="")
+                self._dir_psd_ref = None
+                self._dir_hand_ref = None
+            else:
+                dir_img = None
+                hand_img = None
+                b_val = None
+                if cache_entry is not None and cache_entry.get("dir_len") == xy_len:
+                    dir_img = cache_entry.get("dir_psd")
+                    hand_img = cache_entry.get("dir_hand")
+                    b_val = cache_entry.get("dir_B")
+                if dir_img is None or hand_img is None or b_val is None:
+                    m = self._directionality_metrics(xy_series, self.source_fps)
+                    if m is None:
+                        self._dir_var.set("B: - (waiting for frames)")
+                        if hasattr(self, "_dir_psd_label"):
+                            self._dir_psd_label.configure(image="")
+                        if hasattr(self, "_dir_hand_label"):
+                            self._dir_hand_label.configure(image="")
+                        self._dir_psd_ref = None
+                        self._dir_hand_ref = None
+                    else:
+                        b_val = float(m["B"])
+                        dir_img = self._make_directionality_psd_image(m)
+                        hand_img = self._make_handedness_image(m)
+                        if cache_entry is not None:
+                            cache_entry["dir_len"] = xy_len
+                            cache_entry["dir_psd"] = dir_img
+                            cache_entry["dir_hand"] = hand_img
+                            cache_entry["dir_B"] = b_val
+                if dir_img is not None and hand_img is not None and b_val is not None:
+                    self._dir_var.set(f"B: {b_val:+.3f}   (+1 => +f, -1 => -f)")
+                    dir_tk = ImageTk.PhotoImage(dir_img)
+                    hand_tk = ImageTk.PhotoImage(hand_img)
+                    self._dir_psd_label.configure(image=dir_tk)
+                    self._dir_hand_label.configure(image=hand_tk)
+                    self._dir_psd_ref = dir_tk
+                    self._dir_hand_ref = hand_tk
+        except Exception as exc:
+            err = f"{exc.__class__.__name__}: {exc}"
+            if getattr(self, "_dir_error_last", None) != err:
+                self._dir_error_last = err
+                if hasattr(self, "bottom_var"):
+                    self.bottom_var.set(f"Dir plot error: {err}")
+                traceback.print_exc()
+            self._dir_var.set("B: - (dir plot error)")
             if hasattr(self, "_dir_psd_label"):
                 self._dir_psd_label.configure(image="")
             if hasattr(self, "_dir_hand_label"):
                 self._dir_hand_label.configure(image="")
             self._dir_psd_ref = None
             self._dir_hand_ref = None
-        elif Figure is None or FigureCanvas is None:
-            self._dir_var.set("B: - (install matplotlib)")
-            if hasattr(self, "_dir_psd_label"):
-                self._dir_psd_label.configure(image="")
-            if hasattr(self, "_dir_hand_label"):
-                self._dir_hand_label.configure(image="")
-            self._dir_psd_ref = None
-            self._dir_hand_ref = None
-        else:
-            dir_img = None
-            hand_img = None
-            b_val = None
-            if cache_entry is not None and cache_entry.get("dir_len") == xy_len:
-                dir_img = cache_entry.get("dir_psd")
-                hand_img = cache_entry.get("dir_hand")
-                b_val = cache_entry.get("dir_B")
-            if dir_img is None or hand_img is None or b_val is None:
-                m = self._directionality_metrics(xy_series, self.source_fps)
-                if m is None:
-                    self._dir_var.set("B: - (waiting for frames)")
-                    if hasattr(self, "_dir_psd_label"):
-                        self._dir_psd_label.configure(image="")
-                    if hasattr(self, "_dir_hand_label"):
-                        self._dir_hand_label.configure(image="")
-                    self._dir_psd_ref = None
-                    self._dir_hand_ref = None
-                else:
-                    b_val = float(m["B"])
-                    dir_img = self._make_directionality_psd_image(m)
-                    hand_img = self._make_handedness_image(m)
-                    if cache_entry is not None:
-                        cache_entry["dir_len"] = xy_len
-                        cache_entry["dir_psd"] = dir_img
-                        cache_entry["dir_hand"] = hand_img
-                        cache_entry["dir_B"] = b_val
-            if dir_img is not None and hand_img is not None and b_val is not None:
-                self._dir_var.set(f"B: {b_val:+.3f}   (+1 => +f, -1 => -f)")
-                dir_tk = ImageTk.PhotoImage(dir_img)
-                hand_tk = ImageTk.PhotoImage(hand_img)
-                self._dir_psd_label.configure(image=dir_tk)
-                self._dir_hand_label.configure(image=hand_tk)
-                self._dir_psd_ref = dir_tk
-                self._dir_hand_ref = hand_tk
 
         self._spot_status_var.set(f"Spot {self._spot_idx + 1} / {n}")
 
@@ -2804,8 +2641,21 @@ class BasicVideoPlayer:
         return True
 
     def _load_npy_source(self, path: str) -> bool:
+        # Detect Git LFS pointer files early so we can give a clear error.
         try:
-            arr = np.load(path, mmap_mode="r", allow_pickle=False)
+            with open(path, "rb") as f:
+                head = f.read(200)
+            if b"version https://git-lfs.github.com/spec/v1" in head:
+                messagebox.showerror(
+                    "Error",
+                    "This .npy is a Git LFS pointer, not the real data. Run `git lfs pull` to download it.",
+                )
+                return False
+        except Exception:
+            pass
+
+        try:
+            arr = np.load(path, mmap_mode="r", allow_pickle=True)
         except Exception as e:
             messagebox.showerror("Error", f"Could not load NPY: {e}")
             return False
