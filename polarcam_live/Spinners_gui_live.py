@@ -996,6 +996,69 @@ class BasicVideoPlayer:
         self._fetch_fps_var.trace_add("write", lambda *_: self._sync_fetch_from("fps"))
         self._fetch_n_var.trace_add("write", lambda *_: self._sync_fetch_from("frames"))
         self._fetch_dur_var.trace_add("write", lambda *_: self._sync_fetch_from("duration"))
+        # Live view state
+        self._live_running = False
+        self._live_controller = None
+        self._live_app = None
+        self._live_queue = queue.Queue(maxsize=2)
+        self._live_after_id = None
+        self._live_img_ref = None
+        self._live_img_label = None
+        self._live_zoom_label = None
+        self._live_zoom_blank_ref = None
+        self._live_left_frame = None
+        # Spot capture (tab 3)
+        self._spotrec_running = False
+        self._spotrec_controller = None
+        self._spotrec_app = None
+        self._spotrec_queue = queue.Queue(maxsize=4)
+        self._spotrec_after_id = None
+        self._spotrec_xy_series = []
+        self._spotrec_phi_series = []
+        self._spotrec_frames = []
+        self._spotrec_actual_fps = None
+        self._spotrec_tmp_path = None
+        self._spotrec_proc = None
+        self._spotrec_stop_flag = None
+        self._spotrec_out_path = None
+        self._spotrec_fps_var = tk.StringVar(value="200.0")
+        self._spotrec_exp_ms_var = tk.StringVar(value="0.05")
+        self._spotrec_size_var = tk.StringVar(value="7")
+        self._spotrec_spot_var = tk.StringVar(value="Spot - / -")
+        self._spotrec_status_var = tk.StringVar(value="Idle")
+        self._spotrec_progress_var = tk.StringVar(value="")
+        self._spotrec_start_btn = None
+        self._spotrec_stop_btn = None
+        self._spotrec_save_btn = None
+        self._spotrec_discard_btn = None
+        self._spotrec_tmp_path = None
+        self._spotrec_preview_label = None
+        self._spotrec_preview_scale = 10
+        self._spotrec_preview_size = 19
+        self._spotrec_center_offset = (0, 0)
+        self._spotrec_xy_label = None
+        self._spotrec_phi_label = None
+        self._spotrec_fft_label = None
+        self._spotrec_dir_label = None
+        self._spotrec_hand_label = None
+        self._spotrec_dir_var = tk.StringVar(value="B: -")
+        self._spotrec_xy_ref = None
+        self._spotrec_phi_ref = None
+        self._spotrec_fft_ref = None
+        self._spotrec_dir_ref = None
+        self._spotrec_hand_ref = None
+        self._live_start_btn = None
+        self._live_stop_btn = None
+        self._live_exp_ms_var = tk.StringVar(value="0.05")
+        self._live_gain_var = tk.StringVar(value="0.0")
+        self._live_status_var = tk.StringVar(value="Live feed stopped")
+        self._live_mag_enabled_var = tk.BooleanVar(value=False)
+        self._live_zoom_var = tk.StringVar(value="3.0")
+        self._live_zoom_center = None  # (x,y) in source frame pixels
+        self._live_last_frame = None
+        self._live_disp_scale = 1.0
+        self._live_disp_offset = (0, 0)
+        self._live_zoom_output_px = 240
 
         # Single capture (decoded once)
         self.cap = None
@@ -1091,10 +1154,74 @@ class BasicVideoPlayer:
         self.frame_q = queue.Queue(maxsize=16)
 
         self._build_ui()
+        self._update_spotrec_label()
         self._start_ui_pump()
+        self._spotrec_size_var.trace_add("write", lambda *_: self._spotrec_update_preview())
 
-    def _build_ui(self):
-        top = ttk.Frame(self.root, padding=8)
+    def _build_ui(self) -> None:
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._notebook = notebook
+
+        self._live_tab = ttk.Frame(notebook)
+        self._analysis_tab = ttk.Frame(notebook)
+        self._spotrec_tab = ttk.Frame(notebook)
+        notebook.add(self._live_tab, text="Live video")
+        notebook.add(self._analysis_tab, text="Spot analysis")
+        notebook.add(self._spotrec_tab, text="Spot examine")
+        notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        self._build_live_ui(self._live_tab)
+        self._build_analysis_ui(self._analysis_tab)
+        self._build_spotrec_ui(self._spotrec_tab)
+
+    def _build_live_ui(self, parent: tk.Widget) -> None:
+        top = ttk.Frame(parent, padding=8)
+        top.pack(side=tk.TOP, fill=tk.X)
+
+        self._live_start_btn = ttk.Button(top, text="Start live feed", command=self._start_live_feed)
+        self._live_start_btn.pack(side=tk.LEFT)
+        self._live_stop_btn = ttk.Button(top, text="Stop live feed", command=self._stop_live_feed)
+        self._live_stop_btn.state(["disabled"])
+        self._live_stop_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(top, text="FPS 20").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(top, text="Exp (ms)").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Entry(top, textvariable=self._live_exp_ms_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(top, text="Gain").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Entry(top, textvariable=self._live_gain_var, width=7).pack(side=tk.LEFT)
+        ttk.Button(top, text="Apply", command=self._apply_live_settings).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(top, text="Magnifier", variable=self._live_mag_enabled_var).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(top, text="Zoom x").pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Entry(top, textvariable=self._live_zoom_var, width=5).pack(side=tk.LEFT)
+
+        ttk.Label(top, textvariable=self._live_status_var).pack(side=tk.RIGHT)
+
+        view = ttk.Frame(parent, padding=8)
+        view.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        view.columnconfigure(0, weight=1)
+        view.columnconfigure(1, weight=0, minsize=self._live_zoom_output_px + 10)
+        view.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(view)
+        left.grid(row=0, column=0, sticky="nsew")
+        left.grid_propagate(False)
+        self._live_left_frame = left
+        self._live_img_label = tk.Label(left, bg="black")
+        self._live_img_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._live_img_label.bind("<Button-1>", self._on_live_click)
+
+        right = ttk.Frame(view, width=self._live_zoom_output_px, height=self._live_zoom_output_px)
+        right.grid(row=0, column=1, sticky="n", padx=(10, 0))
+        right.grid_propagate(False)
+        self._live_zoom_label = tk.Label(right, bg="black")
+        self._live_zoom_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        blank = Image.new("L", (self._live_zoom_output_px, self._live_zoom_output_px), 0)
+        self._live_zoom_blank_ref = ImageTk.PhotoImage(blank)
+        self._live_zoom_label.configure(image=self._live_zoom_blank_ref)
+
+    def _build_analysis_ui(self, parent: tk.Widget) -> None:
+        top = ttk.Frame(parent, padding=8)
         top.pack(side=tk.TOP, fill=tk.X)
 
         ttk.Button(top, text="Select AVI/NPY", command=self.open_video).pack(side=tk.LEFT)
@@ -1117,7 +1244,7 @@ class BasicVideoPlayer:
         self.status_var = tk.StringVar(value="No video loaded")
         ttk.Label(top, textvariable=self.status_var).pack(side=tk.LEFT, padx=(12, 0))
 
-        main = ttk.Frame(self.root, padding=8)
+        main = ttk.Frame(parent, padding=8)
         main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         content = ttk.Frame(main)
@@ -1241,6 +1368,768 @@ class BasicVideoPlayer:
 
         self.bottom_var = tk.StringVar(value="")
         ttk.Label(main, textvariable=self.bottom_var).pack(side=tk.BOTTOM, anchor="w")
+
+    def _build_spotrec_ui(self, parent: tk.Widget) -> None:
+        top = ttk.Frame(parent, padding=8)
+        top.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(top, textvariable=self._spotrec_spot_var).pack(side=tk.LEFT)
+        self._spotrec_start_btn = ttk.Button(top, text="Start recording", command=self._start_spotrec)
+        self._spotrec_start_btn.pack(side=tk.LEFT, padx=(10, 0))
+        self._spotrec_stop_btn = ttk.Button(top, text="Stop recording", command=self._stop_spotrec)
+        self._spotrec_stop_btn.state(["disabled"])
+        self._spotrec_stop_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(top, text="FPS").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Entry(top, textvariable=self._spotrec_fps_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(top, text="Exp (ms)").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Entry(top, textvariable=self._spotrec_exp_ms_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(top, text="ROI px").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Entry(top, textvariable=self._spotrec_size_var, width=5).pack(side=tk.LEFT)
+
+        self._spotrec_save_btn = ttk.Button(top, text="Save recording", command=self._spotrec_save)
+        self._spotrec_save_btn.state(["disabled"])
+        self._spotrec_save_btn.pack(side=tk.LEFT, padx=(12, 0))
+        self._spotrec_discard_btn = ttk.Button(top, text="Discard", command=self._spotrec_discard)
+        self._spotrec_discard_btn.state(["disabled"])
+        self._spotrec_discard_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(top, textvariable=self._spotrec_status_var).pack(side=tk.RIGHT)
+        ttk.Label(top, textvariable=self._spotrec_progress_var).pack(side=tk.RIGHT, padx=(0, 12))
+
+        preview = ttk.Frame(parent, padding=(8, 0, 8, 8))
+        preview.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(preview, text="Pick ROI centre").pack(side=tk.LEFT)
+        self._spotrec_preview_label = tk.Label(preview, bg="black")
+        self._spotrec_preview_label.pack(side=tk.LEFT, padx=(10, 0))
+        self._spotrec_preview_label.bind("<Button-1>", self._on_spotrec_preview_click)
+
+        plots = ttk.Frame(parent, padding=8)
+        plots.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        plots.columnconfigure(0, weight=1)
+        plots.columnconfigure(1, weight=1)
+        plots.columnconfigure(2, weight=1)
+        plots.rowconfigure(0, weight=1)
+        plots.rowconfigure(1, weight=1)
+
+        self._spotrec_xy_label = ttk.Label(plots)
+        self._spotrec_xy_label.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
+        self._spotrec_phi_label = ttk.Label(plots)
+        self._spotrec_phi_label.grid(row=0, column=1, sticky="nsew", padx=(8, 8), pady=(0, 8))
+
+        self._spotrec_fft_label = ttk.Label(plots)
+        self._spotrec_fft_label.grid(row=0, column=2, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        dir_frame = ttk.Frame(plots)
+        dir_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
+        ttk.Label(dir_frame, textvariable=self._spotrec_dir_var).pack(side=tk.TOP, anchor="w")
+        self._spotrec_dir_label = ttk.Label(dir_frame)
+        self._spotrec_dir_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self._spotrec_hand_label = ttk.Label(plots)
+        self._spotrec_hand_label.grid(row=1, column=1, sticky="nsew", padx=(8, 8), pady=(0, 8))
+        ttk.Frame(plots).grid(row=1, column=2, sticky="nsew")
+
+    def _on_tab_changed(self, _event=None) -> None:
+        # Always stop live feed when leaving the live tab.
+        if not hasattr(self, "_notebook"):
+            return
+        try:
+            current = self._notebook.select()
+        except Exception:
+            return
+        if current != str(getattr(self, "_live_tab", "")):
+            self._stop_live_feed()
+        if current != str(getattr(self, "_spotrec_tab", "")):
+            self._stop_spotrec()
+
+    def _live_on_frame(self, arr_obj: object) -> None:
+        if not self._live_running:
+            return
+        try:
+            frame16 = np.asarray(arr_obj, dtype=np.uint16, copy=False)
+            frame8 = (frame16 >> 4).astype(np.uint8, copy=False)
+        except Exception:
+            return
+        self._live_last_frame = frame8
+        try:
+            self._live_queue.put_nowait(frame8)
+        except queue.Full:
+            try:
+                self._live_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                self._live_queue.put_nowait(frame8)
+            except queue.Full:
+                pass
+
+    def _apply_live_settings(self) -> None:
+        if not self._live_controller:
+            return
+        exp_ms = self._parse_float(self._live_exp_ms_var.get())
+        gain = self._parse_float(self._live_gain_var.get())
+        if exp_ms is not None and exp_ms > 0.0:
+            self._live_controller.set_timing(20.0, float(exp_ms))
+        if gain is not None:
+            self._live_controller.set_gains(float(gain), None)
+
+    def _start_live_feed(self) -> None:
+        if self._live_running:
+            return
+        try:
+            from PySide6.QtWidgets import QApplication
+            from Controlling.controller.controller import Controller
+        except Exception as e:
+            messagebox.showerror("Live feed", f"Could not start live feed: {e}")
+            return
+
+        exp_ms = self._parse_float(self._live_exp_ms_var.get())
+        gain = self._parse_float(self._live_gain_var.get())
+        if exp_ms is None or exp_ms <= 0.0:
+            messagebox.showerror("Live feed", "Exposure time must be > 0 ms.")
+            return
+        if gain is None:
+            gain = 0.0
+
+        self._live_app = QApplication.instance() or QApplication([])
+        self._live_queue = queue.Queue(maxsize=2)
+        self._live_controller = Controller()
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        if self._live_left_frame is not None:
+            try:
+                w = max(100, int(self._live_left_frame.winfo_width()))
+                h = max(100, int(self._live_left_frame.winfo_height()))
+                self._live_left_frame.configure(width=w, height=h)
+                self._live_left_frame.grid_propagate(False)
+            except Exception:
+                pass
+        try:
+            self._live_controller.open()
+            self._live_controller.full_sensor()
+            self._live_controller.set_timing(20.0, float(exp_ms))
+            self._live_controller.set_gains(float(gain), None)
+            self._live_controller.start()
+            self._live_controller.cam.frame.connect(self._live_on_frame)
+        except Exception as e:
+            try:
+                self._live_controller.close()
+            except Exception:
+                pass
+            self._live_controller = None
+            messagebox.showerror("Live feed", f"Could not start live feed: {e}")
+            return
+
+        self._live_running = True
+        if self._live_start_btn is not None:
+            self._live_start_btn.state(["disabled"])
+        if self._live_stop_btn is not None:
+            self._live_stop_btn.state(["!disabled"])
+        self._live_status_var.set("Live feed running (20 fps)")
+        self._live_tick()
+
+    def _stop_live_feed(self) -> None:
+        if not self._live_running and self._live_controller is None:
+            if self._live_start_btn is not None:
+                self._live_start_btn.state(["!disabled"])
+            if self._live_stop_btn is not None:
+                self._live_stop_btn.state(["disabled"])
+            self._live_status_var.set("Live feed stopped")
+            return
+
+        self._live_running = False
+        if self._live_after_id is not None:
+            try:
+                self.root.after_cancel(self._live_after_id)
+            except Exception:
+                pass
+            self._live_after_id = None
+        if self._live_controller is not None:
+            try:
+                self._live_controller.cam.frame.disconnect(self._live_on_frame)
+            except Exception:
+                pass
+            try:
+                self._live_controller.stop()
+            except Exception:
+                pass
+            try:
+                self._live_controller.close()
+            except Exception:
+                pass
+        self._live_controller = None
+        if self._live_start_btn is not None:
+            self._live_start_btn.state(["!disabled"])
+        if self._live_stop_btn is not None:
+            self._live_stop_btn.state(["disabled"])
+        self._live_status_var.set("Live feed stopped")
+
+    def _live_tick(self) -> None:
+        if not self._live_running:
+            return
+        try:
+            if self._live_app is not None:
+                self._live_app.processEvents()
+        except Exception:
+            pass
+
+        frame = None
+        try:
+            while True:
+                frame = self._live_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        if frame is not None and self._live_img_label is not None:
+            try:
+                img = Image.fromarray(frame)
+                try:
+                    resample = Image.Resampling.BILINEAR
+                except Exception:
+                    resample = Image.BILINEAR
+                w = int(self._live_img_label.winfo_width())
+                h = int(self._live_img_label.winfo_height())
+                if w > 10 and h > 10:
+                    src_w, src_h = img.size
+                    scale = min(float(w) / float(src_w), float(h) / float(src_h))
+                    disp_w = max(1, int(round(src_w * scale)))
+                    disp_h = max(1, int(round(src_h * scale)))
+                    img = img.resize((disp_w, disp_h), resample=resample)
+                    self._live_disp_scale = scale
+                    off_x = max(0, int((w - disp_w) // 2))
+                    off_y = max(0, int((h - disp_h) // 2))
+                    self._live_disp_offset = (off_x, off_y)
+
+                    mag_on = bool(self._live_mag_enabled_var.get())
+                    canvas_mode = "RGB" if mag_on else "L"
+                    canvas = Image.new(canvas_mode, (w, h), 0)
+                    if mag_on:
+                        canvas.paste(img.convert("RGB"), (off_x, off_y))
+                    else:
+                        canvas.paste(img, (off_x, off_y))
+
+                    if mag_on:
+                        z = self._parse_float(self._live_zoom_var.get())
+                        zoom = float(z) if z and z > 0.1 else 1.0
+                        zoom = max(1.0, zoom)
+                        out_sz = int(self._live_zoom_output_px)
+                        win = max(8, int(round(float(out_sz) / float(zoom))))
+                        win = min(win, int(src_w), int(src_h))
+                        win = max(1, int(win))
+                        cx, cy = None, None
+                        if self._live_zoom_center is not None:
+                            cx, cy = self._live_zoom_center
+                        if cx is None or cy is None:
+                            cx = src_w / 2.0
+                            cy = src_h / 2.0
+                        half = win // 2
+                        x0 = int(round(cx)) - half
+                        y0 = int(round(cy)) - half
+                        x0 = max(0, min(int(src_w) - win, x0))
+                        y0 = max(0, min(int(src_h) - win, y0))
+                        x1 = x0 + win
+                        y1 = y0 + win
+
+                        draw = ImageDraw.Draw(canvas)
+                        dx0 = int(round(off_x + x0 * scale))
+                        dy0 = int(round(off_y + y0 * scale))
+                        dx1 = int(round(off_x + x1 * scale))
+                        dy1 = int(round(off_y + y1 * scale))
+                        draw.rectangle([dx0, dy0, dx1, dy1], outline=(255, 0, 0), width=2)
+
+                        if self._live_zoom_label is not None:
+                            crop = Image.fromarray(frame[y0:y1, x0:x1])
+                            zoom_img = crop.resize((out_sz, out_sz), resample=resample)
+                            zoom_photo = ImageTk.PhotoImage(zoom_img)
+                            self._live_zoom_label.configure(image=zoom_photo)
+                            self._live_zoom_label.image = zoom_photo
+                    else:
+                        if self._live_zoom_label is not None and self._live_zoom_blank_ref is not None:
+                            self._live_zoom_label.configure(image=self._live_zoom_blank_ref)
+
+                    img = canvas
+
+                photo = ImageTk.PhotoImage(img)
+                self._live_img_label.configure(image=photo)
+                self._live_img_ref = photo
+            except Exception:
+                pass
+
+        self._live_after_id = self.root.after(50, self._live_tick)
+
+    def _on_live_click(self, event) -> None:
+        if self._live_last_frame is None:
+            return
+        try:
+            off_x, off_y = self._live_disp_offset
+            scale = float(self._live_disp_scale) if self._live_disp_scale else 1.0
+            x = float(event.x) - float(off_x)
+            y = float(event.y) - float(off_y)
+            if x < 0 or y < 0:
+                return
+            src_h, src_w = self._live_last_frame.shape
+            fx = x / scale
+            fy = y / scale
+            if fx < 0 or fy < 0 or fx >= src_w or fy >= src_h:
+                return
+            self._live_zoom_center = (float(fx), float(fy))
+        except Exception:
+            return
+
+    def _update_spotrec_label(self) -> None:
+        if not self._spot_centers:
+            self._spotrec_spot_var.set("Spot - / -")
+            if self._spotrec_start_btn is not None and not self._spotrec_running:
+                self._spotrec_start_btn.state(["disabled"])
+            self._spotrec_update_preview()
+            return
+        n = len(self._spot_centers)
+        idx = max(0, min(self._spot_idx, n - 1))
+        self._spotrec_spot_var.set(f"Spot {idx + 1} / {n}")
+        if self._spotrec_start_btn is not None and not self._spotrec_running:
+            self._spotrec_start_btn.state(["!disabled"])
+        self._spotrec_update_preview()
+
+    def _spotrec_update_preview(self) -> None:
+        if self._spotrec_preview_label is None:
+            return
+        if not self._spot_centers or self._s_map is None:
+            self._spotrec_preview_label.configure(image="")
+            return
+        idx = max(0, min(self._spot_idx, len(self._spot_centers) - 1))
+        cx, cy = self._spot_centers[idx]
+
+        win = int(self._spotrec_preview_size)
+        window = self._extract_window(self._s_map, cx, cy, win)
+        u8 = detect_spinners.to_u8_preview(window, lo_pct=0.0, hi_pct=100.0)
+
+        roi = self._parse_int(self._spotrec_size_var.get()) or 7
+        roi = max(1, int(roi))
+        if roi % 2 == 0:
+            roi += 1
+        if roi > win:
+            roi = win
+        half_roi = roi // 2
+        half_win = win // 2
+
+        off_x, off_y = self._spotrec_center_offset
+        off_x = max(-half_win + half_roi, min(half_win - half_roi, int(round(off_x))))
+        off_y = max(-half_win + half_roi, min(half_win - half_roi, int(round(off_y))))
+        self._spotrec_center_offset = (off_x, off_y)
+
+        x0 = half_win + off_x - half_roi
+        y0 = half_win + off_y - half_roi
+        x1 = x0 + roi - 1
+        y1 = y0 + roi - 1
+
+        img = Image.fromarray(u8).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([x0, y0, x1, y1], outline=(255, 0, 0), width=1)
+
+        scale = int(self._spotrec_preview_scale)
+        img = img.resize((win * scale, win * scale), resample=Image.NEAREST)
+        photo = ImageTk.PhotoImage(img)
+        self._spotrec_preview_label.configure(image=photo)
+        self._spotrec_preview_label.image = photo
+
+    def _on_spotrec_preview_click(self, event) -> None:
+        if not self._spot_centers:
+            return
+        win = int(self._spotrec_preview_size)
+        scale = int(self._spotrec_preview_scale)
+        if scale <= 0:
+            return
+        try:
+            x = int(event.x // scale)
+            y = int(event.y // scale)
+        except Exception:
+            return
+        half_win = win // 2
+        off_x = x - half_win
+        off_y = y - half_win
+        self._spotrec_center_offset = (off_x, off_y)
+        self._spotrec_update_preview()
+
+    def _spotrec_on_frame(self, arr_obj: object) -> None:
+        if not self._spotrec_running:
+            return
+        try:
+            frame16 = np.asarray(arr_obj, dtype=np.uint16, copy=True)
+        except Exception:
+            return
+        # No frame dropping: record every frame.
+        self._spotrec_frames.append(frame16)
+        x, y, phi = self._spotrec_compute_xy_phi(frame16)
+        self._spotrec_xy_series.append((x, y))
+        self._spotrec_phi_series.append(phi)
+
+    def _spotrec_on_timing(self, payload: object) -> None:
+        try:
+            d = dict(payload or {})
+            rf = d.get("resulting_fps")
+            if rf is None:
+                rf = d.get("fps")
+            if rf is not None:
+                self._spotrec_actual_fps = float(rf)
+        except Exception:
+            return
+
+    def _spotrec_compute_xy_phi(self, gray: np.ndarray) -> tuple[float, float, float]:
+        # Match tab-2 averaging order: compute I0/I45/I90/I135 planes, then mean over a window.
+        if gray.ndim != 2:
+            g = gray[..., 0]
+        else:
+            g = gray
+        I90 = g[0::2, 0::2]
+        I45 = g[0::2, 1::2]
+        I135 = g[1::2, 0::2]
+        I0 = g[1::2, 1::2]
+
+        ih, iw = I0.shape
+        win_raw = self._parse_int(self._spotrec_size_var.get()) or 7
+        win_raw = max(1, int(win_raw))
+        win = max(1, int(round(win_raw / 2.0)))
+        if win % 2 == 0:
+            win += 1
+        half = win // 2
+        cx = iw // 2
+        cy = ih // 2
+        x0 = max(0, cx - half)
+        x1 = min(iw, cx + half + 1)
+        y0 = max(0, cy - half)
+        y1 = min(ih, cy + half + 1)
+
+        eps = 1e-6
+        a0 = I0[y0:y1, x0:x1]
+        a90 = I90[y0:y1, x0:x1]
+        a45 = I45[y0:y1, x0:x1]
+        a135 = I135[y0:y1, x0:x1]
+
+        m0 = float(a0.mean()) if a0.size else 0.0
+        m90 = float(a90.mean()) if a90.size else 0.0
+        m45 = float(a45.mean()) if a45.size else 0.0
+        m135 = float(a135.mean()) if a135.size else 0.0
+        x = (m0 - m90) / (m0 + m90 + eps)
+        y = (m45 - m135) / (m45 + m135 + eps)
+        # Polarization angle: half-angle of XY (range ~[-pi/2, pi/2]).
+        phi = float(0.5 * np.arctan2(y, x))
+        return float(x), float(y), phi
+
+    def _spotrec_tick(self) -> None:
+        if not self._spotrec_running:
+            return
+        try:
+            if self._spotrec_app is not None:
+                self._spotrec_app.processEvents()
+        except Exception:
+            pass
+
+        self._spotrec_status_var.set(f"Recording... frames={len(self._spotrec_phi_series)}")
+        self._spotrec_after_id = self.root.after(30, self._spotrec_tick)
+
+    def _start_spotrec(self) -> None:
+        if self._spotrec_running:
+            return
+        if not self._spot_centers:
+            messagebox.showerror("Spot examine", "No spot selected.")
+            return
+        fps = self._parse_float(self._spotrec_fps_var.get())
+        exp_ms = self._parse_float(self._spotrec_exp_ms_var.get())
+        if fps is None or fps <= 0.0:
+            messagebox.showerror("Spot examine", "Frame rate must be > 0.")
+            return
+        if exp_ms is None or exp_ms <= 0.0:
+            messagebox.showerror("Spot examine", "Exposure time must be > 0 ms.")
+            return
+
+        # Ensure live feed is stopped so the camera is free.
+        self._stop_live_feed()
+
+        idx = max(0, min(self._spot_idx, len(self._spot_centers) - 1))
+        cx, cy = self._spot_centers[idx]
+        off_x, off_y = self._spotrec_center_offset
+        w_user = self._parse_int(self._spotrec_size_var.get()) or 7
+        w_user = max(1, int(w_user))
+        if w_user % 2 == 0:
+            w_user += 1
+        h_user = w_user
+        cx2 = float(cx) + float(off_x)
+        cy2 = float(cy) + float(off_y)
+        x = int(round(cx2)) - (w_user // 2)
+        y = int(round(cy2)) - (h_user // 2)
+        if (x % 2) != 0:
+            x -= 1
+        if (y % 2) != 0:
+            y -= 1
+        x = max(0, x)
+        y = max(0, y)
+
+        out_dir = Path.cwd() / "spotrec_runs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        out_path = out_dir / f"spotrec_{ts}.npy"
+        stop_flag = out_dir / f"spotrec_{ts}.stop"
+        try:
+            stop_flag.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        script = Path(__file__).resolve().parent / "fetch_frames.py"
+        args = [
+            sys.executable,
+            str(script),
+            "--out-dir",
+            str(out_dir),
+            "--out-path",
+            str(out_path),
+            "--roi",
+            str(x),
+            str(y),
+            str(w_user),
+            str(h_user),
+            "--fps",
+            str(float(fps)),
+            "--exp-ms",
+            str(float(exp_ms)),
+            "--stop-flag",
+            str(stop_flag),
+            "--json",
+            "--n-frames",
+            "100000",
+        ]
+
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except Exception as e:
+            messagebox.showerror("Spot examine", f"Could not start recording: {e}")
+            return
+
+        self._spotrec_proc = proc
+        self._spotrec_stop_flag = stop_flag
+        self._spotrec_out_path = out_path
+        self._spotrec_xy_series = []
+        self._spotrec_phi_series = []
+        self._spotrec_frames = []
+        self._spotrec_actual_fps = None
+        self._spotrec_tmp_path = None
+        if self._spotrec_save_btn is not None:
+            self._spotrec_save_btn.state(["disabled"])
+        if self._spotrec_discard_btn is not None:
+            self._spotrec_discard_btn.state(["disabled"])
+
+        self._spotrec_running = True
+        if self._spotrec_start_btn is not None:
+            self._spotrec_start_btn.state(["disabled"])
+        if self._spotrec_stop_btn is not None:
+            self._spotrec_stop_btn.state(["!disabled"])
+        self._spotrec_status_var.set("Recording...")
+        self._spotrec_progress_var.set("")
+
+    def _stop_spotrec(self) -> None:
+        if not self._spotrec_running and self._spotrec_proc is None:
+            if self._spotrec_start_btn is not None:
+                self._spotrec_start_btn.state(["!disabled"])
+            if self._spotrec_stop_btn is not None:
+                self._spotrec_stop_btn.state(["disabled"])
+            return
+
+        self._spotrec_running = False
+        if self._spotrec_stop_flag is not None:
+            try:
+                Path(self._spotrec_stop_flag).write_text("stop")
+            except Exception:
+                pass
+
+        if self._spotrec_stop_btn is not None:
+            self._spotrec_stop_btn.state(["disabled"])
+        self._spotrec_status_var.set("Stopping...")
+
+        proc = self._spotrec_proc
+        self._spotrec_proc = None
+
+        def _wait_and_process():
+            if proc is None:
+                return
+            try:
+                out, err = proc.communicate()
+            except Exception as e:
+                self._ui_call(messagebox.showerror, "Spot examine", str(e))
+                return
+            if proc.returncode != 0:
+                msg = (err or out or "Recording failed.").strip()
+                self._ui_call(messagebox.showerror, "Spot examine", msg)
+                self._ui_call(self._spotrec_status_var.set, "Recording failed.")
+                self._ui_call(self._spotrec_progress_var.set, "")
+                self._ui_call(self._update_spotrec_label)
+                if self._spotrec_start_btn is not None:
+                    self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                return
+
+            payload = (out or "").strip().splitlines()
+            if not payload:
+                self._ui_call(messagebox.showerror, "Spot examine", "No output from recorder.")
+                if self._spotrec_start_btn is not None:
+                    self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                return
+            try:
+                data = json.loads(payload[-1])
+                path = Path(str(data.get("path", "")))
+                actual_fps = data.get("actual_fps")
+                actual_fps = float(actual_fps) if actual_fps is not None else None
+            except Exception as e:
+                self._ui_call(messagebox.showerror, "Spot examine", f"Bad output: {e}")
+                if self._spotrec_start_btn is not None:
+                    self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                return
+            if not path.exists():
+                self._ui_call(messagebox.showerror, "Spot examine", "Recording file missing.")
+                if self._spotrec_start_btn is not None:
+                    self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                return
+
+            try:
+                arr = np.load(path, mmap_mode="r", allow_pickle=False)
+            except Exception as e:
+                self._ui_call(messagebox.showerror, "Spot examine", f"Could not load: {e}")
+                if self._spotrec_start_btn is not None:
+                    self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                return
+
+            xy_series = []
+            phi_series = []
+            total = int(arr.shape[0]) if arr.ndim >= 3 else 0
+            step = max(1, total // 20) if total else 1
+            for i in range(total):
+                frame = arr[i]
+                x, y, phi = self._spotrec_compute_xy_phi(frame)
+                xy_series.append((x, y))
+                phi_series.append(phi)
+                if (i + 1) % step == 0 or (i + 1) == total:
+                    self._ui_call(self._spotrec_progress_var.set, f"Analyzing {i+1}/{total}")
+
+            self._ui_call(self._spotrec_progress_var.set, "Analysis complete")
+            self._ui_call(self._spotrec_status_var.set, f"Stopped. frames={total}")
+
+            def _apply_results():
+                self._spotrec_actual_fps = actual_fps
+                if self._spotrec_actual_fps and self._spotrec_actual_fps > 0.0:
+                    self._spotrec_fps_var.set(f"{float(self._spotrec_actual_fps):.3f}")
+                self._spotrec_xy_series = xy_series
+                self._spotrec_phi_series = phi_series
+                self._spotrec_tmp_path = path
+                if self._spotrec_save_btn is not None:
+                    self._spotrec_save_btn.state(["!disabled"])
+                if self._spotrec_discard_btn is not None:
+                    self._spotrec_discard_btn.state(["!disabled"])
+                self._spotrec_refresh_plots()
+                self._update_spotrec_label()
+                if self._spotrec_start_btn is not None:
+                    self._spotrec_start_btn.state(["!disabled"])
+            self._ui_call(_apply_results)
+
+        t = threading.Thread(target=_wait_and_process, daemon=True)
+        t.start()
+
+    def _spotrec_refresh_plots(self) -> None:
+        fps = self._spotrec_actual_fps
+        if not fps or fps <= 0.0:
+            fps = self._parse_float(self._spotrec_fps_var.get()) or 1.0
+
+        xy = list(self._spotrec_xy_series)
+        phi = list(self._spotrec_phi_series)
+
+        if self._spotrec_xy_label is not None:
+            img = self._make_xy_scatter_image(xy)
+            img = img.resize((320, 320), resample=Image.BILINEAR)
+            photo = ImageTk.PhotoImage(img)
+            self._spotrec_xy_label.configure(image=photo)
+            self._spotrec_xy_ref = photo
+
+        if self._spotrec_phi_label is not None:
+            img = self._make_phi_plot_image(phi, fps)
+            img = img.resize((320, 180), resample=Image.BILINEAR)
+            photo = ImageTk.PhotoImage(img)
+            self._spotrec_phi_label.configure(image=photo)
+            self._spotrec_phi_ref = photo
+
+        if self._spotrec_fft_label is not None:
+            img = self._make_fft_image(phi, fps)
+            img = img.resize((320, 220), resample=Image.BILINEAR)
+            photo = ImageTk.PhotoImage(img)
+            self._spotrec_fft_label.configure(image=photo)
+            self._spotrec_fft_ref = photo
+
+        m = self._directionality_metrics(xy, fps)
+        if m is None:
+            self._spotrec_dir_var.set("B: -")
+            if self._spotrec_dir_label is not None:
+                self._spotrec_dir_label.configure(image="")
+            if self._spotrec_hand_label is not None:
+                self._spotrec_hand_label.configure(image="")
+            return
+
+        b = m.get("B")
+        if b is None:
+            self._spotrec_dir_var.set("B: -")
+        else:
+            self._spotrec_dir_var.set(f"B: {float(b):.3f}")
+
+        if self._spotrec_dir_label is not None:
+            img = self._make_directionality_psd_image(m)
+            img = img.resize((320, 220), resample=Image.BILINEAR)
+            photo = ImageTk.PhotoImage(img)
+            self._spotrec_dir_label.configure(image=photo)
+            self._spotrec_dir_ref = photo
+
+        if self._spotrec_hand_label is not None:
+            img = self._make_handedness_image(m)
+            img = img.resize((320, 220), resample=Image.BILINEAR)
+            photo = ImageTk.PhotoImage(img)
+            self._spotrec_hand_label.configure(image=photo)
+            self._spotrec_hand_ref = photo
+
+    def _spotrec_save(self) -> None:
+        if self._spotrec_tmp_path is None:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save spot recording",
+            defaultextension=".npy",
+            filetypes=[("NumPy files", "*.npy"), ("All files", "*.*")],
+            initialdir=str(Path.cwd()),
+        )
+        if not path:
+            return
+        dest = Path(path)
+        try:
+            if dest.exists():
+                if not messagebox.askyesno("Overwrite", "File exists. Overwrite?"):
+                    return
+            os.replace(self._spotrec_tmp_path, dest)
+            self._spotrec_tmp_path = dest
+            self._spotrec_status_var.set(f"Saved: {dest.name}")
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+
+    def _spotrec_discard(self) -> None:
+        if self._spotrec_tmp_path is None:
+            return
+        try:
+            Path(self._spotrec_tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+        self._spotrec_tmp_path = None
+        if self._spotrec_save_btn is not None:
+            self._spotrec_save_btn.state(["disabled"])
+        if self._spotrec_discard_btn is not None:
+            self._spotrec_discard_btn.state(["disabled"])
+        self._spotrec_status_var.set("Discarded.")
 
     def _on_smap_click(self, event) -> None:
         """
@@ -2256,6 +3145,7 @@ class BasicVideoPlayer:
             self._xy_img_ref = None
             self._dir_psd_ref = None
             self._dir_hand_ref = None
+            self._update_spotrec_label()
             return
 
         n = len(self._spot_centers)
@@ -2263,6 +3153,7 @@ class BasicVideoPlayer:
         self.spot_next_btn.configure(state=tk.NORMAL)
         self._spot_idx = max(0, min(self._spot_idx, n - 1))
         cx, cy = self._spot_centers[self._spot_idx]
+        self._update_spotrec_label()
 
         cache_ok = (
             self._spot_window_cache_size == int(self._spot_window_size)
@@ -3319,6 +4210,8 @@ class BasicVideoPlayer:
             self._smap_overlay_pending = []
 
     def on_close(self):
+        self._stop_live_feed()
+        self._stop_spotrec()
         self._close_video()
         self.root.destroy()
 
