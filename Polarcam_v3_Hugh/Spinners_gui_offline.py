@@ -268,7 +268,7 @@ class BasicVideoPlayer:
     EDGE_EXCLUDE_PX = int(detect_spinners.EDGE_EXCLUDE_PX)
     PLAYBACK_FPS = 20.0
     # Overview S-map display scale. 0.5 is "half-res".
-    S_MAP_DISPLAY_SCALE = 0.6
+    S_MAP_DISPLAY_SCALE = 0.4
     S_MAP_RING_R = 14          # full-res pixels (slightly larger rings for visibility)
     S_MAP_DISPLAY_GAMMA = 1.25  # less aggressive than log; suppresses background noise
     # Directionality analysis
@@ -1025,17 +1025,17 @@ class BasicVideoPlayer:
         self._spot_img_label = ttk.Label(right)
         self._spot_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 10))
 
-        ttk.Label(right, text="Phi FFT").pack(side=tk.TOP, anchor="w")
-        self._fft_img_label = ttk.Label(right)
-        self._fft_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 10))
+        ttk.Label(right, text="X/Y scatter").pack(side=tk.TOP, anchor="w")
+        self._xy_img_label = ttk.Label(right)
+        self._xy_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 10))
 
         ttk.Label(right, text="Phi(t)").pack(side=tk.TOP, anchor="w")
         self._phi_img_label = ttk.Label(right)
         self._phi_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 10))
 
-        ttk.Label(right, text="X/Y scatter").pack(side=tk.TOP, anchor="w")
-        self._xy_img_label = ttk.Label(right)
-        self._xy_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 0))
+        ttk.Label(right, text="Phi FFT").pack(side=tk.TOP, anchor="w")
+        self._fft_img_label = ttk.Label(right)
+        self._fft_img_label.pack(side=tk.TOP, anchor="w", pady=(2, 0))
 
         # Directionality panel (right-most).
         ttk.Label(dir_panel, text="Rotation directionality").pack(side=tk.TOP, anchor="w")
