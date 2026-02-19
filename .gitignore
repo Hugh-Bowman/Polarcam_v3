@@ -4,3 +4,21 @@ __pycache__/
 varmap_runs/
 cycles/
 captures/venv/
+
+# large data files
+*.npy
+*.avi
+frame_runs/
+spotrec_runs/
+*.npz
+*.json
+*.txt
+*.log
+*.csv
+*.tsv
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.hdf
+*.hdf4
