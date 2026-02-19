@@ -1,0 +1,416 @@
+2026-02-12 14:51:02 [SpotAnalysis] S-map compute: 0.050s
+2026-02-12 14:51:02 [SpotAnalysis] S-map histogram: 0.049s
+2026-02-12 14:51:04 [SpotAnalysis] S-map save variants: 1.360s
+2026-02-12 14:51:04 [SpotAnalysis] Find centers: 0.075s
+2026-02-12 14:51:04 [SpotAnalysis] Init analysis: 0.160s
+2026-02-12 14:51:04 [SpotAnalysis] Ring filter: 0.004s
+2026-02-12 14:51:04 [SpotAnalysis] Total analysis time: 2.986s
+2026-02-12 14:56:44 [SpotAnalysis] S-map compute: 0.053s
+2026-02-12 14:56:44 [SpotAnalysis] S-map histogram: 0.045s
+2026-02-12 14:56:44 [SpotAnalysis] Find centers: 0.083s
+2026-02-12 14:56:44 [SpotAnalysis] Init analysis: 0.228s
+2026-02-12 14:56:44 [SpotAnalysis] Ring filter: 0.006s
+2026-02-12 14:56:44 [SpotAnalysis] Total analysis time: 1.722s
+2026-02-12 14:56:46 [SpotAnalysis] S-map save variants: 1.810s
+2026-02-12 15:02:57 [SpotAnalysis] S-map compute: 0.049s
+2026-02-12 15:02:57 [SpotAnalysis] Find centers: 0.071s
+2026-02-12 15:02:58 [SpotAnalysis] Init analysis: 0.251s
+2026-02-12 15:02:58 [SpotAnalysis] Ring filter: 0.008s
+2026-02-12 15:02:58 [SpotAnalysis] Total analysis time: 1.724s
+2026-02-12 16:08:07 [SpotAnalysis] S-map compute: 0.054s
+2026-02-12 16:08:07 [SpotAnalysis] Find centers: 0.077s
+2026-02-12 16:08:08 [SpotAnalysis] Init analysis: 0.172s
+2026-02-12 16:08:08 [SpotAnalysis] Ring filter: 0.006s
+2026-02-12 16:08:08 [SpotAnalysis] Total analysis time: 1.627s
+2026-02-12 16:09:06 [SpotAnalysis] S-map compute: 0.055s
+2026-02-12 16:09:06 [SpotAnalysis] Find centers: 0.077s
+2026-02-12 16:09:07 [SpotAnalysis] Init analysis: 0.282s
+2026-02-12 16:09:07 [SpotAnalysis] Ring filter: 0.007s
+2026-02-12 16:09:07 [SpotAnalysis] Total analysis time: 1.864s
+2026-02-12 16:10:09 [SpotAnalysis] S-map compute: 0.055s
+2026-02-12 16:10:09 [SpotAnalysis] Find centers: 0.070s
+2026-02-12 16:10:10 [SpotAnalysis] Init analysis: 0.218s
+2026-02-12 16:10:10 [SpotAnalysis] Ring filter: 0.005s
+2026-02-12 16:10:10 [SpotAnalysis] Total analysis time: 1.666s
+2026-02-12 16:11:10 [SpotAnalysis] S-map compute: 0.050s
+2026-02-12 16:11:10 [SpotAnalysis] Find centers: 0.072s
+2026-02-12 16:11:10 [SpotAnalysis] Init analysis: 0.229s
+2026-02-12 16:11:11 [SpotAnalysis] Ring filter: 0.007s
+2026-02-12 16:11:11 [SpotAnalysis] Total analysis time: 1.711s
+2026-02-12 16:14:41 [SpotAnalysis] S-map compute: 0.051s
+2026-02-12 16:14:41 [SpotAnalysis] Find centers: 0.070s
+2026-02-12 16:14:41 [SpotAnalysis] Init analysis: 0.231s
+2026-02-12 16:14:41 [SpotAnalysis] Ring filter: 0.007s
+2026-02-12 16:14:41 [SpotAnalysis] Total analysis time: 1.685s
+2026-02-12 16:18:07 [SpotAnalysis] S-map compute: 0.051s
+2026-02-12 16:18:07 [SpotAnalysis] Find centers: 0.078s
+2026-02-12 16:18:07 [SpotAnalysis] Init analysis: 0.233s
+2026-02-12 16:18:07 [SpotAnalysis] Ring filter: 0.006s
+2026-02-12 16:18:07 [SpotAnalysis] Total analysis time: 1.700s
+2026-02-12 16:23:18 [SpotAnalysis] S-map compute: 0.052s
+2026-02-12 16:23:18 [SpotAnalysis] Find centers: 0.077s
+2026-02-12 16:23:18 [SpotAnalysis] Init analysis: 0.223s
+2026-02-12 16:23:19 [SpotAnalysis] Ring filter: 0.006s
+2026-02-12 16:23:19 [SpotAnalysis] Total analysis time: 1.667s
+2026-02-12 16:28:37 [SpotAnalysis] S-map compute: 0.051s
+2026-02-12 16:28:37 [SpotAnalysis] Find centers: 0.073s
+2026-02-12 16:28:37 [SpotAnalysis] Init analysis: 0.232s
+2026-02-12 16:28:38 [SpotAnalysis] Ring filter: 0.006s
+2026-02-12 16:28:38 [SpotAnalysis] Total analysis time: 1.705s
+2026-02-12 16:35:26 [SpotAnalysis] S-map compute: 0.080s
+2026-02-12 16:35:26 [SpotAnalysis] Find centers: 0.074s
+2026-02-12 16:35:27 [SpotAnalysis] Init analysis: 0.428s
+2026-02-12 16:35:27 [SpotAnalysis] Ring filter: 0.012s
+2026-02-12 16:35:27 [SpotAnalysis] Total analysis time: 5.312s
+2026-02-12 16:41:18 [SpotAnalysis] S-map compute: 0.079s
+2026-02-12 16:41:18 [SpotAnalysis] Find centers: 0.079s
+2026-02-12 16:41:18 [SpotAnalysis] Init analysis: 0.349s
+2026-02-12 16:41:19 [SpotAnalysis] Ring filter: 0.010s
+2026-02-12 16:41:19 [SpotAnalysis] Total analysis time: 5.087s
+2026-02-12 16:44:06 [SpotAnalysis] S-map compute: 0.087s
+2026-02-12 16:44:06 [SpotAnalysis] Find centers: 0.074s
+2026-02-12 16:44:06 [SpotAnalysis] Init analysis: 0.421s
+2026-02-12 16:44:07 [SpotAnalysis] Ring filter: 0.016s
+2026-02-12 16:44:07 [SpotAnalysis] Total analysis time: 5.224s
+2026-02-12 16:49:48 [SpotAnalysis] S-map compute: 0.077s
+2026-02-12 16:49:48 [SpotAnalysis] Find centers: 0.072s
+2026-02-12 16:49:49 [SpotAnalysis] Init analysis: 0.384s
+2026-02-12 16:49:49 [SpotAnalysis] Ring filter: 0.012s
+2026-02-12 16:49:49 [SpotAnalysis] Total analysis time: 5.191s
+2026-02-12 16:56:29 [SpotAnalysis] S-map compute: 0.084s
+2026-02-12 16:56:29 [SpotAnalysis] Find centers: 0.078s
+2026-02-12 16:56:29 [SpotAnalysis] Init analysis: 0.264s
+2026-02-12 16:56:29 [SpotAnalysis] Ring filter: 0.008s
+2026-02-12 16:56:29 [SpotAnalysis] Total analysis time: 5.018s
+2026-02-12 16:57:02 [SpotAnalysis] S-map compute: 0.082s
+2026-02-12 16:57:02 [SpotAnalysis] Find centers: 0.072s
+2026-02-12 16:57:03 [SpotAnalysis] Init analysis: 0.368s
+2026-02-12 16:57:03 [SpotAnalysis] Ring filter: 0.013s
+2026-02-12 16:57:03 [SpotAnalysis] Total analysis time: 5.107s
+2026-02-12 16:57:49 [SpotAnalysis] S-map compute: 0.082s
+2026-02-12 16:57:49 [SpotAnalysis] Find centers: 0.073s
+2026-02-12 16:57:49 [SpotAnalysis] Init analysis: 0.125s
+2026-02-12 16:57:49 [SpotAnalysis] Ring filter: 0.004s
+2026-02-12 16:57:49 [SpotAnalysis] Total analysis time: 4.636s
+2026-02-12 16:58:26 [SpotAnalysis] S-map compute: 0.078s
+2026-02-12 16:58:26 [SpotAnalysis] Find centers: 0.087s
+2026-02-12 16:58:26 [SpotAnalysis] Init analysis: 0.246s
+2026-02-12 16:58:26 [SpotAnalysis] Ring filter: 0.009s
+2026-02-12 16:58:26 [SpotAnalysis] Total analysis time: 4.882s
+2026-02-12 16:59:50 [SpotAnalysis] S-map compute: 0.087s
+2026-02-12 16:59:50 [SpotAnalysis] Find centers: 0.076s
+2026-02-12 16:59:50 [SpotAnalysis] Init analysis: 0.419s
+2026-02-12 16:59:51 [SpotAnalysis] Ring filter: 0.013s
+2026-02-12 16:59:51 [SpotAnalysis] Total analysis time: 5.200s
+2026-02-12 17:01:17 [SpotAnalysis] S-map compute: 0.079s
+2026-02-12 17:01:17 [SpotAnalysis] Find centers: 0.072s
+2026-02-12 17:01:17 [SpotAnalysis] Init analysis: 0.269s
+2026-02-12 17:01:18 [SpotAnalysis] Ring filter: 0.010s
+2026-02-12 17:01:18 [SpotAnalysis] Total analysis time: 4.952s
+2026-02-12 17:02:31 [SpotAnalysis] S-map compute: 0.082s
+2026-02-12 17:02:31 [SpotAnalysis] Find centers: 0.071s
+2026-02-12 17:02:31 [SpotAnalysis] Init analysis: 0.464s
+2026-02-12 17:02:32 [SpotAnalysis] Ring filter: 0.015s
+2026-02-12 17:02:32 [SpotAnalysis] Total analysis time: 5.388s
+2026-02-12 17:03:59 [SpotAnalysis] S-map compute: 0.079s
+2026-02-12 17:03:59 [SpotAnalysis] Find centers: 0.073s
+2026-02-12 17:04:00 [SpotAnalysis] Init analysis: 0.426s
+2026-02-12 17:04:00 [SpotAnalysis] Ring filter: 0.015s
+2026-02-12 17:04:00 [SpotAnalysis] Total analysis time: 5.335s
+2026-02-12 17:13:26 [SpotAnalysis] S-map compute: 0.079s
+2026-02-12 17:13:26 [SpotAnalysis] Find centers: 0.075s
+2026-02-12 17:13:27 [SpotAnalysis] Init analysis: 0.379s
+2026-02-12 17:13:27 [SpotAnalysis] Ring filter: 0.015s
+2026-02-12 17:13:27 [SpotAnalysis] Total analysis time: 5.206s
+2026-02-12 17:15:18 [SpotAnalysis] S-map compute: 0.079s
+2026-02-12 17:15:18 [SpotAnalysis] Find centers: 0.072s
+2026-02-12 17:15:19 [SpotAnalysis] Init analysis: 0.322s
+2026-02-12 17:15:19 [SpotAnalysis] Ring filter: 0.017s
+2026-02-12 17:15:19 [SpotAnalysis] Total analysis time: 5.065s
+2026-02-12 17:16:38 [SpotAnalysis] S-map compute: 0.085s
+2026-02-12 17:16:38 [SpotAnalysis] Find centers: 0.072s
+2026-02-12 17:16:39 [SpotAnalysis] Init analysis: 0.241s
+2026-02-12 17:16:39 [SpotAnalysis] Ring filter: 0.007s
+2026-02-12 17:16:39 [SpotAnalysis] Total analysis time: 4.922s
+2026-02-12 17:17:37 [SpotAnalysis] (short) S-map compute: 0.077s
+2026-02-12 17:17:37 [SpotAnalysis] (short) Find centers: 0.072s
+2026-02-12 17:17:37 [SpotAnalysis] (short) Init analysis: 0.319s
+2026-02-12 17:17:37 [SpotAnalysis] Ring filter: 0.006s
+2026-02-12 17:17:37 [SpotAnalysis] Total analysis time: 3.621s
+2026-02-13 15:06:50 [SpotAnalysis] S-map compute: 0.079s
+2026-02-13 15:06:50 [SpotAnalysis] Find centers: 0.074s
+2026-02-13 15:06:51 [SpotAnalysis] Init analysis: 0.315s
+2026-02-13 15:06:51 [SpotAnalysis] Ring filter: 0.009s
+2026-02-13 15:06:51 [SpotAnalysis] Total analysis time: 5.017s
+2026-02-13 15:09:32 [SpotAnalysis] S-map compute: 0.080s
+2026-02-13 15:09:32 [SpotAnalysis] Find centers: 0.072s
+2026-02-13 15:09:33 [SpotAnalysis] Init analysis: 0.355s
+2026-02-13 15:09:33 [SpotAnalysis] Ring filter: 0.011s
+2026-02-13 15:09:33 [SpotAnalysis] Total analysis time: 5.142s
+2026-02-13 15:14:05 [SpotAnalysis] S-map compute: 0.080s
+2026-02-13 15:14:05 [SpotAnalysis] Find centers: 0.073s
+2026-02-13 15:14:05 [SpotAnalysis] Init analysis: 0.338s
+2026-02-13 15:14:05 [SpotAnalysis] Ring filter: 0.011s
+2026-02-13 15:14:05 [SpotAnalysis] Total analysis time: 5.057s
+2026-02-13 15:22:42 [SpotAnalysis] S-map compute: 0.078s
+2026-02-13 15:22:42 [SpotAnalysis] Find centers: 0.073s
+2026-02-13 15:22:42 [SpotAnalysis] Init analysis: 0.344s
+2026-02-13 15:22:42 [SpotAnalysis] Ring filter: 0.010s
+2026-02-13 15:22:42 [SpotAnalysis] Total analysis time: 5.081s
+2026-02-13 16:08:46 [SpotAnalysis] S-map compute: 0.081s
+2026-02-13 16:08:46 [SpotAnalysis] Find centers: 0.076s
+2026-02-13 16:08:47 [SpotAnalysis] Init analysis: 0.121s
+2026-02-13 16:08:47 [SpotAnalysis] Ring filter: 0.004s
+2026-02-13 16:08:47 [SpotAnalysis] Total analysis time: 4.623s
+2026-02-13 16:09:44 [SpotAnalysis] S-map compute: 0.078s
+2026-02-13 16:09:44 [SpotAnalysis] Find centers: 0.073s
+2026-02-13 16:09:44 [SpotAnalysis] Init analysis: 0.381s
+2026-02-13 16:09:45 [SpotAnalysis] Ring filter: 0.014s
+2026-02-13 16:09:45 [SpotAnalysis] Total analysis time: 5.154s
+2026-02-13 18:10:37 [SpotAnalysis] S-map compute: 0.081s
+2026-02-13 18:10:37 [SpotAnalysis] Find centers: 0.074s
+2026-02-13 18:10:38 [SpotAnalysis] Init analysis: 0.332s
+2026-02-13 18:10:38 [SpotAnalysis] Ring filter: 0.014s
+2026-02-13 18:10:38 [SpotAnalysis] Total analysis time: 5.074s
+2026-02-13 18:11:58 [SpotAnalysis] S-map compute: 0.078s
+2026-02-13 18:11:58 [SpotAnalysis] Find centers: 0.071s
+2026-02-13 18:11:58 [SpotAnalysis] Init analysis: 0.328s
+2026-02-13 18:11:59 [SpotAnalysis] Ring filter: 0.009s
+2026-02-13 18:11:59 [SpotAnalysis] Total analysis time: 5.028s
+2026-02-13 18:12:25 [SpotAnalysis] S-map compute: 0.081s
+2026-02-13 18:12:25 [SpotAnalysis] Find centers: 0.072s
+2026-02-13 18:12:25 [SpotAnalysis] Init analysis: 0.426s
+2026-02-13 18:12:26 [SpotAnalysis] Ring filter: 0.014s
+2026-02-13 18:12:26 [SpotAnalysis] Total analysis time: 5.289s
+2026-02-18 16:37:22 [SpotAnalysis] S-map compute: 0.080s
+2026-02-18 16:37:22 [SpotAnalysis] Find centers: 0.074s
+2026-02-18 16:37:22 [SpotAnalysis] Init analysis: 0.278s
+2026-02-18 16:37:22 [SpotAnalysis] Ring filter: 0.008s
+2026-02-18 16:37:22 [SpotAnalysis] Total analysis time: 5.054s
+2026-02-18 16:38:44 [SpotAnalysis] S-map compute: 0.083s
+2026-02-18 16:38:44 [SpotAnalysis] Find centers: 0.070s
+2026-02-18 16:38:44 [SpotAnalysis] Init analysis: 0.245s
+2026-02-18 16:38:44 [SpotAnalysis] Ring filter: 0.010s
+2026-02-18 16:38:44 [SpotAnalysis] Total analysis time: 4.908s
+2026-02-18 16:41:11 [SpotAnalysis] S-map compute: 0.162s
+2026-02-18 16:41:11 [SpotAnalysis] Find centers: 0.073s
+2026-02-18 16:41:11 [SpotAnalysis] Init analysis: 0.139s
+2026-02-18 16:41:11 [SpotAnalysis] Ring filter: 0.006s
+2026-02-18 16:41:11 [SpotAnalysis] Total analysis time: 4.796s
+2026-02-18 16:42:07 [SpotAnalysis] S-map compute: 0.079s
+2026-02-18 16:42:07 [SpotAnalysis] Find centers: 0.072s
+2026-02-18 16:42:07 [SpotAnalysis] Init analysis: 0.032s
+2026-02-18 16:42:07 [SpotAnalysis] Ring filter: 0.001s
+2026-02-18 16:42:07 [SpotAnalysis] Total analysis time: 4.454s
+2026-02-18 16:43:00 [SpotAnalysis] S-map compute: 0.080s
+2026-02-18 16:43:00 [SpotAnalysis] Find centers: 0.073s
+2026-02-18 16:43:00 [SpotAnalysis] Init analysis: 0.128s
+2026-02-18 16:43:00 [SpotAnalysis] Ring filter: 0.004s
+2026-02-18 16:43:00 [SpotAnalysis] Total analysis time: 4.662s
+2026-02-18 16:45:23 [SpotAnalysis] S-map compute: 0.080s
+2026-02-18 16:45:23 [SpotAnalysis] Find centers: 0.071s
+2026-02-18 16:45:23 [SpotAnalysis] Init analysis: 0.029s
+2026-02-18 16:45:23 [SpotAnalysis] Ring filter: 0.001s
+2026-02-18 16:45:23 [SpotAnalysis] Total analysis time: 4.449s
+2026-02-18 16:46:17 [SpotAnalysis] S-map compute: 0.083s
+2026-02-18 16:46:17 [SpotAnalysis] Find centers: 0.078s
+2026-02-18 16:46:17 [SpotAnalysis] Init analysis: 0.022s
+2026-02-18 16:46:17 [SpotAnalysis] Ring filter: 0.001s
+2026-02-18 16:46:17 [SpotAnalysis] Total analysis time: 4.357s
+2026-02-19 12:32:11 [SpotAnalysis] S-map compute: 0.078s
+2026-02-19 12:32:11 [SpotAnalysis] Find centers: 0.074s
+2026-02-19 12:32:11 [SpotAnalysis] Init analysis: 0.143s
+2026-02-19 12:32:11 [SpotAnalysis] Ring filter: 0.003s
+2026-02-19 12:32:11 [SpotAnalysis] Total analysis time: 4.739s
+2026-02-19 12:34:02 [SpotAnalysis] S-map compute: 0.080s
+2026-02-19 12:34:02 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 12:34:02 [SpotAnalysis] Init analysis: 0.045s
+2026-02-19 12:34:02 [SpotAnalysis] Ring filter: 0.001s
+2026-02-19 12:34:02 [SpotAnalysis] Total analysis time: 4.531s
+2026-02-19 12:38:09 [SpotAnalysis] S-map compute: 0.092s
+2026-02-19 12:38:09 [SpotAnalysis] Find centers: 0.079s
+2026-02-19 12:38:09 [SpotAnalysis] Init analysis: 0.107s
+2026-02-19 12:38:09 [SpotAnalysis] Ring filter: 0.003s
+2026-02-19 12:38:09 [SpotAnalysis] Total analysis time: 4.683s
+2026-02-19 12:39:22 [SpotAnalysis] S-map compute: 0.078s
+2026-02-19 12:39:22 [SpotAnalysis] Find centers: 0.071s
+2026-02-19 12:39:22 [SpotAnalysis] Init analysis: 0.091s
+2026-02-19 12:39:23 [SpotAnalysis] Ring filter: 0.002s
+2026-02-19 12:39:23 [SpotAnalysis] Total analysis time: 4.619s
+2026-02-19 13:00:10 [SpotAnalysis] S-map compute: 0.078s
+2026-02-19 13:00:10 [SpotAnalysis] Find centers: 0.079s
+2026-02-19 13:00:10 [SpotAnalysis] Init analysis: 0.482s
+2026-02-19 13:00:11 [SpotAnalysis] Ring filter: 0.013s
+2026-02-19 13:00:11 [SpotAnalysis] Total analysis time: 5.428s
+2026-02-19 13:01:43 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 13:01:43 [SpotAnalysis] Find centers: 0.071s
+2026-02-19 13:01:44 [SpotAnalysis] Init analysis: 0.569s
+2026-02-19 13:01:44 [SpotAnalysis] Ring filter: 0.016s
+2026-02-19 13:01:44 [SpotAnalysis] Total analysis time: 5.605s
+2026-02-19 13:02:29 [SpotAnalysis] S-map compute: 0.092s
+2026-02-19 13:02:29 [SpotAnalysis] Find centers: 0.076s
+2026-02-19 13:02:30 [SpotAnalysis] Init analysis: 0.639s
+2026-02-19 13:02:30 [SpotAnalysis] Ring filter: 0.020s
+2026-02-19 13:02:30 [SpotAnalysis] Total analysis time: 5.808s
+2026-02-19 13:04:05 [SpotAnalysis] S-map compute: 0.088s
+2026-02-19 13:04:05 [SpotAnalysis] Find centers: 0.070s
+2026-02-19 13:04:06 [SpotAnalysis] Init analysis: 0.523s
+2026-02-19 13:04:06 [SpotAnalysis] Ring filter: 0.013s
+2026-02-19 13:04:06 [SpotAnalysis] Total analysis time: 5.661s
+2026-02-19 13:34:47 [SpotAnalysis] S-map compute: 0.080s
+2026-02-19 13:34:47 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 13:34:47 [SpotAnalysis] Init analysis: 0.457s
+2026-02-19 13:34:48 [SpotAnalysis] Ring filter: 0.012s
+2026-02-19 13:34:48 [SpotAnalysis] Total analysis time: 5.403s
+2026-02-19 13:50:21 [SpotAnalysis] S-map compute: 0.078s
+2026-02-19 13:50:21 [SpotAnalysis] Find centers: 0.077s
+2026-02-19 13:50:21 [SpotAnalysis] Init analysis: 0.510s
+2026-02-19 13:50:22 [SpotAnalysis] Ring filter: 0.014s
+2026-02-19 13:50:22 [SpotAnalysis] Total analysis time: 5.713s
+2026-02-19 13:59:55 [SpotAnalysis] S-map compute: 0.086s
+2026-02-19 13:59:55 [SpotAnalysis] Find centers: 0.071s
+2026-02-19 13:59:55 [SpotAnalysis] Init analysis: 0.051s
+2026-02-19 13:59:55 [SpotAnalysis] Ring filter: 0.002s
+2026-02-19 13:59:55 [SpotAnalysis] Total analysis time: 4.464s
+2026-02-19 14:03:07 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 14:03:07 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 14:03:07 [SpotAnalysis] Init analysis: 0.030s
+2026-02-19 14:03:07 [SpotAnalysis] Ring filter: 0.001s
+2026-02-19 14:03:07 [SpotAnalysis] Total analysis time: 4.399s
+2026-02-19 14:25:15 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 14:25:15 [SpotAnalysis] Find centers: 0.075s
+2026-02-19 14:25:16 [SpotAnalysis] Init analysis: 0.340s
+2026-02-19 14:25:16 [SpotAnalysis] Ring filter: 0.008s
+2026-02-19 14:25:16 [SpotAnalysis] Total analysis time: 5.082s
+2026-02-19 14:25:47 [SpotAnalysis] S-map compute: 0.076s
+2026-02-19 14:25:47 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 14:25:48 [SpotAnalysis] Init analysis: 0.332s
+2026-02-19 14:25:48 [SpotAnalysis] Ring filter: 0.012s
+2026-02-19 14:25:50 [SpotAnalysis] Auto inspect: 2.185s
+2026-02-19 14:25:50 [SpotAnalysis] Total analysis time: 7.273s
+2026-02-19 14:34:25 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 14:34:25 [SpotAnalysis] Find centers: 0.075s
+2026-02-19 14:34:26 [SpotAnalysis] Init analysis: 0.470s
+2026-02-19 14:34:26 [SpotAnalysis] Ring filter: 0.012s
+2026-02-19 14:34:26 [SpotAnalysis] Total analysis time: 5.386s
+2026-02-19 14:37:05 [SpotAnalysis] S-map compute: 0.083s
+2026-02-19 14:37:05 [SpotAnalysis] Find centers: 0.074s
+2026-02-19 14:37:06 [SpotAnalysis] Init analysis: 0.429s
+2026-02-19 14:37:06 [SpotAnalysis] Ring filter: 0.014s
+2026-02-19 14:37:06 [SpotAnalysis] Total analysis time: 5.310s
+2026-02-19 14:40:19 [SpotAnalysis] Auto inspect: 182.318s
+2026-02-19 15:54:58 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 15:54:58 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 15:54:58 [SpotAnalysis] Init analysis: 0.249s
+2026-02-19 15:54:58 [SpotAnalysis] Ring filter: 0.007s
+2026-02-19 15:54:58 [SpotAnalysis] Total analysis time: 4.950s
+2026-02-19 15:55:22 [SpotAnalysis] Auto inspect: 17.658s
+2026-02-19 16:01:09 [SpotAnalysis] S-map compute: 0.080s
+2026-02-19 16:01:09 [SpotAnalysis] Find centers: 0.080s
+2026-02-19 16:01:09 [SpotAnalysis] Init analysis: 0.248s
+2026-02-19 16:01:10 [SpotAnalysis] Ring filter: 0.007s
+2026-02-19 16:01:10 [SpotAnalysis] Total analysis time: 4.915s
+2026-02-19 16:01:45 [SpotAnalysis] Auto inspect: 19.357s
+2026-02-19 16:06:55 [SpotAnalysis] S-map compute: 0.081s
+2026-02-19 16:06:55 [SpotAnalysis] Find centers: 0.073s
+2026-02-19 16:06:56 [SpotAnalysis] Init analysis: 0.230s
+2026-02-19 16:06:56 [SpotAnalysis] Ring filter: 0.008s
+2026-02-19 16:06:56 [SpotAnalysis] Total analysis time: 4.946s
+2026-02-19 16:07:20 [SpotAnalysis] Auto inspect: 19.434s
+2026-02-19 16:09:14 [SpotAnalysis] S-map compute: 0.078s
+2026-02-19 16:09:14 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 16:09:14 [SpotAnalysis] Init analysis: 0.091s
+2026-02-19 16:09:14 [SpotAnalysis] Ring filter: 0.004s
+2026-02-19 16:09:14 [SpotAnalysis] Total analysis time: 4.574s
+2026-02-19 16:09:34 [SpotAnalysis] Auto inspect: 19.324s
+2026-02-19 16:11:30 [SpotAnalysis] S-map compute: 0.080s
+2026-02-19 16:11:30 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 16:11:30 [SpotAnalysis] Init analysis: 0.137s
+2026-02-19 16:11:31 [SpotAnalysis] Ring filter: 0.004s
+2026-02-19 16:11:31 [SpotAnalysis] Total analysis time: 4.782s
+2026-02-19 16:12:15 [SpotAnalysis] S-map compute: 0.077s
+2026-02-19 16:12:15 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 16:12:16 [SpotAnalysis] Init analysis: 0.471s
+2026-02-19 16:12:16 [SpotAnalysis] Ring filter: 0.015s
+2026-02-19 16:12:16 [SpotAnalysis] Total analysis time: 5.326s
+2026-02-19 16:13:58 [SpotAnalysis] Auto inspect: 19.266s
+2026-02-19 16:15:22 [SpotAnalysis] S-map compute: 0.078s
+2026-02-19 16:15:22 [SpotAnalysis] Find centers: 0.074s
+2026-02-19 16:15:22 [SpotAnalysis] Init analysis: 0.411s
+2026-02-19 16:15:23 [SpotAnalysis] Ring filter: 0.011s
+2026-02-19 16:15:23 [SpotAnalysis] Total analysis time: 5.350s
+2026-02-19 16:16:53 [SpotAnalysis] Auto inspect: 19.374s
+2026-02-19 16:23:23 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 16:23:23 [SpotAnalysis] Find centers: 0.074s
+2026-02-19 16:23:23 [SpotAnalysis] Init analysis: 0.498s
+2026-02-19 16:23:24 [SpotAnalysis] Ring filter: 0.012s
+2026-02-19 16:23:24 [SpotAnalysis] Total analysis time: 5.427s
+2026-02-19 16:24:04 [SpotAnalysis] Auto inspect: 19.721s
+2026-02-19 16:24:24 [SpotAnalysis] S-map compute: 0.083s
+2026-02-19 16:24:24 [SpotAnalysis] Find centers: 0.073s
+2026-02-19 16:24:25 [SpotAnalysis] Init analysis: 0.481s
+2026-02-19 16:24:25 [SpotAnalysis] Ring filter: 0.013s
+2026-02-19 16:24:25 [SpotAnalysis] Total analysis time: 5.466s
+2026-02-19 16:24:45 [SpotAnalysis] Auto inspect: 19.357s
+2026-02-19 16:27:53 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 16:27:53 [SpotAnalysis] Find centers: 0.075s
+2026-02-19 16:27:53 [SpotAnalysis] Init analysis: 0.366s
+2026-02-19 16:27:54 [SpotAnalysis] Ring filter: 0.010s
+2026-02-19 16:27:54 [SpotAnalysis] Total analysis time: 5.182s
+2026-02-19 16:28:13 [SpotAnalysis] Auto inspect: 19.501s
+2026-02-19 16:30:24 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 16:30:24 [SpotAnalysis] Find centers: 0.074s
+2026-02-19 16:30:24 [SpotAnalysis] Init analysis: 0.483s
+2026-02-19 16:30:25 [SpotAnalysis] Ring filter: 0.014s
+2026-02-19 16:30:25 [SpotAnalysis] Total analysis time: 5.391s
+2026-02-19 16:30:45 [SpotAnalysis] Auto inspect: 19.879s
+2026-02-19 16:33:39 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 16:33:39 [SpotAnalysis] Find centers: 0.074s
+2026-02-19 16:33:39 [SpotAnalysis] Init analysis: 0.505s
+2026-02-19 16:33:40 [SpotAnalysis] Ring filter: 0.013s
+2026-02-19 16:33:40 [SpotAnalysis] Total analysis time: 5.508s
+2026-02-19 16:34:17 [SpotAnalysis] Auto inspect: 19.477s
+2026-02-19 16:36:05 [SpotAnalysis] S-map compute: 0.089s
+2026-02-19 16:36:05 [SpotAnalysis] Find centers: 0.078s
+2026-02-19 16:36:06 [SpotAnalysis] Init analysis: 0.135s
+2026-02-19 16:36:06 [SpotAnalysis] Ring filter: 0.004s
+2026-02-19 16:36:06 [SpotAnalysis] Total analysis time: 4.894s
+2026-02-19 16:36:25 [SpotAnalysis] Auto inspect: 19.447s
+2026-02-19 16:39:16 [SpotAnalysis] S-map compute: 0.149s
+2026-02-19 16:39:16 [SpotAnalysis] Find centers: 0.090s
+2026-02-19 16:39:16 [SpotAnalysis] Init analysis: 0.087s
+2026-02-19 16:39:16 [SpotAnalysis] Ring filter: 0.003s
+2026-02-19 16:39:16 [SpotAnalysis] Total analysis time: 5.089s
+2026-02-19 16:39:51 [SpotAnalysis] Auto inspect: 19.559s
+2026-02-19 16:41:24 [SpotAnalysis] S-map compute: 0.081s
+2026-02-19 16:41:24 [SpotAnalysis] Find centers: 0.074s
+2026-02-19 16:41:24 [SpotAnalysis] Init analysis: 0.104s
+2026-02-19 16:41:24 [SpotAnalysis] Ring filter: 0.003s
+2026-02-19 16:41:24 [SpotAnalysis] Total analysis time: 4.835s
+2026-02-19 16:41:51 [SpotAnalysis] Auto inspect: 19.357s
+2026-02-19 16:45:13 [SpotAnalysis] S-map compute: 0.081s
+2026-02-19 16:45:13 [SpotAnalysis] Find centers: 0.070s
+2026-02-19 16:45:13 [SpotAnalysis] Init analysis: 0.024s
+2026-02-19 16:45:13 [SpotAnalysis] Ring filter: 0.001s
+2026-02-19 16:45:13 [SpotAnalysis] Total analysis time: 4.571s
+2026-02-19 16:45:46 [SpotAnalysis] Auto inspect: 19.482s
+2026-02-19 16:47:45 [SpotAnalysis] S-map compute: 0.082s
+2026-02-19 16:47:45 [SpotAnalysis] Find centers: 0.072s
+2026-02-19 16:47:45 [SpotAnalysis] Init analysis: 0.087s
+2026-02-19 16:47:45 [SpotAnalysis] Ring filter: 0.002s
+2026-02-19 16:47:45 [SpotAnalysis] Total analysis time: 4.651s
+2026-02-19 16:48:51 [SpotAnalysis] S-map compute: 0.089s
+2026-02-19 16:48:51 [SpotAnalysis] Find centers: 0.076s
+2026-02-19 16:48:51 [SpotAnalysis] Init analysis: 0.105s
+2026-02-19 16:48:52 [SpotAnalysis] Ring filter: 0.004s
+2026-02-19 16:48:52 [SpotAnalysis] Total analysis time: 4.675s
+2026-02-19 16:49:38 [SpotAnalysis] S-map compute: 0.079s
+2026-02-19 16:49:38 [SpotAnalysis] Find centers: 0.073s
+2026-02-19 16:49:38 [SpotAnalysis] Init analysis: 0.164s
+2026-02-19 16:49:38 [SpotAnalysis] Ring filter: 0.005s
+2026-02-19 16:49:38 [SpotAnalysis] Total analysis time: 4.923s
+2026-02-19 16:50:33 [SpotAnalysis] S-map compute: 0.082s
+2026-02-19 16:50:34 [SpotAnalysis] Find centers: 0.074s
+2026-02-19 16:50:34 [SpotAnalysis] Init analysis: 0.102s
+2026-02-19 16:50:34 [SpotAnalysis] Ring filter: 0.003s
+2026-02-19 16:50:34 [SpotAnalysis] Total analysis time: 4.725s

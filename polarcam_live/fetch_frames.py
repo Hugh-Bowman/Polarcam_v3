@@ -32,21 +32,24 @@ def fetch_frames(
     roi: tuple[int, int, int, int] | None = None,
     stop_flag: Path | None = None,
     out_path: Path | None = None,
-) -> tuple[Path, float | None, int]:
+) -> tuple[Path, float | None, int, dict | None]:
     app = QApplication.instance() or QApplication([])
     controller = Controller()
 
     collected: list[np.ndarray] = []
     done = False
     actual_fps: float | None = None
+    actual_roi: dict | None = None
+    first_frame_seen = False
 
     def _on_frame(arr_obj: object) -> None:
-        nonlocal done
+        nonlocal done, first_frame_seen
         if done:
             return
         frame16 = np.asarray(arr_obj, dtype=np.uint16, copy=True)
         frame8 = _as_uint8(frame16)
         collected.append(frame8)
+        first_frame_seen = True
         if stop_after is not None and len(collected) >= stop_after:
             done = True
 
@@ -62,22 +65,54 @@ def fetch_frames(
         except Exception:
             return
 
+    def _on_roi(payload: object) -> None:
+        nonlocal actual_roi
+        try:
+            actual_roi = dict(payload or {})
+        except Exception:
+            return
+
     try:
         controller.open()
+        controller.cam.roi.connect(_on_roi)
         if roi is None:
             controller.full_sensor()
         else:
             x, y, w, h = roi
             controller.set_roi(float(w), float(h), float(x), float(y))
+        try:
+            controller.refresh_roi()
+        except Exception:
+            pass
         controller.set_timing(fps, exp_ms)
-        controller.start()
-
         controller.cam.frame.connect(_on_frame)
         controller.cam.timing.connect(_on_timing)
+        controller.start()
         try:
             controller.refresh_timing()
         except Exception:
             pass
+
+        t0 = __import__("time").time()
+        while actual_roi is None and (__import__("time").time() - t0) < 0.5:
+            app.processEvents()
+            sleep(0.01)
+
+        # Wait briefly for first frame, retry start once if needed.
+        t_first = __import__("time").time()
+        while not first_frame_seen and (__import__("time").time() - t_first) < 0.75:
+            app.processEvents()
+            sleep(0.002)
+        if not first_frame_seen:
+            try:
+                controller.stop()
+            except Exception:
+                pass
+            controller.start()
+            t_retry = __import__("time").time()
+            while not first_frame_seen and (__import__("time").time() - t_retry) < 1.25:
+                app.processEvents()
+                sleep(0.002)
 
         while not done:
             app.processEvents()
@@ -91,6 +126,10 @@ def fetch_frames(
             pass
         try:
             controller.cam.timing.disconnect(_on_timing)
+        except Exception:
+            pass
+        try:
+            controller.cam.roi.disconnect(_on_roi)
         except Exception:
             pass
         try:
@@ -111,7 +150,7 @@ def fetch_frames(
         out_path = out_dir / f"frame_stack_{ts}.npy"
     stack = np.stack(collected[:n_frames], axis=0)
     np.save(out_path, stack)
-    return out_path, actual_fps, int(stack.shape[0])
+    return out_path, actual_fps, int(stack.shape[0]), actual_roi
 
 
 def main() -> None:
@@ -127,7 +166,7 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="Emit JSON with path and actual_fps")
     args = parser.parse_args()
 
-    out_path, actual_fps, count = fetch_frames(
+    out_path, actual_fps, count, actual_roi = fetch_frames(
         Path(args.out_dir),
         n_frames=max(1, int(args.n_frames)),
         stop_after=(max(1, int(args.stop_after)) if args.stop_after is not None else None),
@@ -138,7 +177,7 @@ def main() -> None:
         out_path=Path(args.out_path) if args.out_path else None,
     )
     if args.json:
-        print(json.dumps({"path": str(out_path), "actual_fps": actual_fps, "count": count}))
+        print(json.dumps({"path": str(out_path), "actual_fps": actual_fps, "count": count, "roi": actual_roi}))
     else:
         print(str(out_path))
 

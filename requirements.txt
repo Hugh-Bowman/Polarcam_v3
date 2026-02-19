@@ -1,0 +1,9 @@
+numpy
+opencv-python
+Pillow
+scipy
+matplotlib
+PySide6
+scikit-image
+ids-peak
+ids-peak-ipl

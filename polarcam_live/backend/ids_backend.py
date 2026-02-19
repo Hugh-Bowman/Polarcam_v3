@@ -1397,6 +1397,12 @@ class IDSCamera(ICamera):
         QMetaObject.invokeMethod(self._worker, "query_timing", Qt.QueuedConnection)
 
     @Slot()
+    def refresh_roi(self) -> None:
+        if not self._worker:
+            return
+        QMetaObject.invokeMethod(self._worker, "query_roi", Qt.QueuedConnection)
+
+    @Slot()
     def refresh_gains(self) -> None:
         if not self._worker:
             log.debug("[UI] refresh_gains ignored: no worker")

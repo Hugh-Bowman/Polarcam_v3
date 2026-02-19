@@ -37,7 +37,17 @@ except Exception:  # pragma: no cover
     FigureCanvas = None
 
 import Detection_alg_offline as detect_spinners
-from pol_reconstruction import make_xy_reconstructor
+from pol_reconstruction import make_qu_reconstructor
+
+
+def _append_timing_log(msg: str) -> None:
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        path = Path.cwd() / "spot_analysis_timing.txt"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"{ts} {msg}\n")
+    except Exception:
+        pass
 
 
 def _welch_fallback(
@@ -266,6 +276,11 @@ def _to_gray_u8(frame: np.ndarray) -> np.ndarray:
 
 class BasicVideoPlayer:
     DEFAULT_RING_SCORE_MIN = 0.0
+    ABS_RANGE_MIN = 0.50
+    AUTO_INSPECT_TOP_N = 5
+    AUTO_INSPECT_FRAMES = 3125
+    AUTO_INSPECT_FPS = 1500.0
+    AUTO_INSPECT_ROI_RAW = 11
     MIN_RING_FRAMES = 20
     S_MAP_SMOOTH_K = int(detect_spinners.S_MAP_SMOOTH_K)
     EDGE_EXCLUDE_PX = int(detect_spinners.EDGE_EXCLUDE_PX)
@@ -321,132 +336,8 @@ class BasicVideoPlayer:
         """
         Save S_map images with detected spots.
         """
-        try:
-            u8 = detect_spinners.to_u8_preview(s_map, lo_pct=0.0, hi_pct=100.0)
-        except Exception as e:
-            messagebox.showerror("Spinner detect error", str(e))
-            return
-
-        img_rgb = Image.fromarray(u8).convert("RGB")
-
-        try:
-            out_path = Path.cwd() / "S_map_spots.png"
-            img_rgb.save(out_path)
-        except Exception as e:
-            messagebox.showwarning("Save image warning", f"Could not save S_map image: {e}")
-
-        if self._overlay_base_frame is not None:
-            try:
-                raw_rgb = Image.fromarray(self._overlay_base_frame).convert("RGB")
-                raw_out_path = Path.cwd() / "frame1_spots.png"
-                raw_rgb.save(raw_out_path)
-                try:
-                    u8_log = self._log_stretch_u8(self._overlay_base_frame)
-                    Image.fromarray(u8_log).convert("RGB").save(
-                        Path.cwd() / "frame1_spots_log_stretch.png"
-                    )
-                except Exception as e:
-                    messagebox.showwarning(
-                        "Save image warning", f"Could not save raw frame log stretch: {e}"
-                    )
-            except Exception as e:
-                messagebox.showwarning(
-                    "Save image warning", f"Could not save raw frame image: {e}"
-                )
-
-        self._st_popup_img_ref = None
-        self._st_popup_label = None
-
-    def _save_raw_s_map_image(self, s_map: np.ndarray) -> None:
-        """
-        Save the raw S_map (before DoG filtering) for comparison.
-        """
-        try:
-            u8 = detect_spinners.to_u8_preview(s_map, lo_pct=0.0, hi_pct=100.0)
-        except Exception as e:
-            messagebox.showwarning("Save image warning", f"Could not preview S_map: {e}")
-            return
-        try:
-            out_path = Path.cwd() / "S_map_raw.png"
-            Image.fromarray(u8).convert("RGB").save(out_path)
-        except Exception as e:
-            messagebox.showwarning("Save image warning", f"Could not save raw S_map image: {e}")
-
-    def _log_stretch_u8(self, img: np.ndarray) -> np.ndarray:
-        """
-        Log intensity stretch to uint8 for better background visibility.
-        """
-        x = img.astype(np.float32, copy=False)
-        x = np.maximum(x, 0.0)
-        vmax = float(np.max(x)) if x.size else 0.0
-        if not np.isfinite(vmax) or vmax <= 0.0:
-            return np.zeros_like(x, dtype=np.uint8)
-        y = np.log1p(x) / np.log1p(vmax)
-        return (np.clip(y, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-
-    def _save_s_map_variants(self, s_no_smooth: np.ndarray, s_smoothed: np.ndarray) -> None:
-        """
-        Save:
-          - S_no_smooth: range metric without spatial smoothing
-          - S_smoothed: range metric after 5x5 smoothing of X/Y
-          - S_DoG: DoG-filtered version of S_smoothed (positive values)
-        """
-        try:
-            u8_raw = detect_spinners.to_u8_preview(s_no_smooth, lo_pct=0.0, hi_pct=100.0)
-            Image.fromarray(u8_raw).convert("RGB").save(Path.cwd() / "S_no_smooth.png")
-        except Exception as e:
-            messagebox.showwarning("Save image warning", f"Could not save S_no_smooth: {e}")
-        else:
-            try:
-                u8_log = self._log_stretch_u8(s_no_smooth)
-                Image.fromarray(u8_log).convert("RGB").save(
-                    Path.cwd() / "S_no_smooth_log_stretch.png"
-                )
-            except Exception as e:
-                messagebox.showwarning("Save image warning", f"Could not save S_no_smooth log stretch: {e}")
-
-        try:
-            u8_sm = detect_spinners.to_u8_preview(s_smoothed, lo_pct=0.0, hi_pct=100.0)
-            Image.fromarray(u8_sm).convert("RGB").save(Path.cwd() / "S_smoothed.png")
-        except Exception as e:
-            messagebox.showwarning("Save image warning", f"Could not save S_smoothed: {e}")
-        else:
-            try:
-                u8_log = self._log_stretch_u8(s_smoothed)
-                Image.fromarray(u8_log).convert("RGB").save(
-                    Path.cwd() / "S_smoothed_log_stretch.png"
-                )
-            except Exception as e:
-                messagebox.showwarning("Save image warning", f"Could not save S_smoothed log stretch: {e}")
-
-        if cv2 is None:
-            return
-        try:
-            g1 = cv2.GaussianBlur(
-                s_smoothed.astype(np.float32, copy=False),
-                ksize=(0, 0),
-                sigmaX=float(detect_spinners.DOG_SIGMA_SMALL),
-                borderType=cv2.BORDER_REPLICATE,
-            )
-            g2 = cv2.GaussianBlur(
-                s_smoothed.astype(np.float32, copy=False),
-                ksize=(0, 0),
-                sigmaX=float(detect_spinners.DOG_SIGMA_LARGE),
-                borderType=cv2.BORDER_REPLICATE,
-            )
-            dog = g1 - g2
-            dog = np.maximum(dog, 0.0)
-            u8_dog = detect_spinners.to_u8_preview(dog, lo_pct=0.0, hi_pct=100.0)
-            Image.fromarray(u8_dog).convert("RGB").save(Path.cwd() / "S_DoG.png")
-            try:
-                u8_log = self._log_stretch_u8(dog)
-                Image.fromarray(u8_log).convert("RGB").save(
-                    Path.cwd() / "S_DoG_log_stretch.png"
-                )
-            except Exception as e:
-                messagebox.showwarning("Save image warning", f"Could not save S_DoG log stretch: {e}")
-        except Exception as e:
-            messagebox.showwarning("Save image warning", f"Could not save S_DoG: {e}")
+        # Diagnostics disabled: no S_map or frame image saving.
+        return
 
     def _anisotropy_range_s_map(
         self,
@@ -459,12 +350,22 @@ class BasicVideoPlayer:
         # S: squared sum of the anisotropy ranges (unnormalised; no intensity weighting).
         rx = (max_x.astype(np.float32) - min_x.astype(np.float32))
         ry = (max_y.astype(np.float32) - min_y.astype(np.float32))
-        s_int = (rx * rx) + (ry * ry)  # (H/2, W/2)
+        s_int = (rx * rx) + (ry * ry)
 
         # Expand to raw pixel grid so spot coordinates remain in full-res space.
         h, w = raw_shape
-        s_full = np.repeat(np.repeat(s_int, 2, axis=0), 2, axis=1)
-        return (s_full[:h, :w].astype(np.float32, copy=False), s_int.astype(np.float32, copy=False))
+        si_h, si_w = s_int.shape
+        if (si_h, si_w) == (h, w):
+            s_full = s_int
+        elif (si_h, si_w) == (h - 1, w - 1):
+            # Full-resolution intersection grid: preserve detail and just pad to sensor extents.
+            s_full = np.pad(s_int, ((0, 1), (0, 1)), mode="edge")
+        elif cv2 is not None:
+            s_full = cv2.resize(s_int, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            s_full = np.repeat(np.repeat(s_int, 2, axis=0), 2, axis=1)
+            s_full = s_full[:h, :w]
+        return (s_full.astype(np.float32, copy=False), s_int.astype(np.float32, copy=False))
 
     def _ring_likeness_score(
         self, xy_series: list[tuple[float, float]], eps: float = 1e-12
@@ -519,6 +420,8 @@ class BasicVideoPlayer:
             if not self._spot_centers_all or not self._spot_xy_series_all:
                 return
             ring_thr = float(self._ring_score_min)
+            abs_thr = float(self.ABS_RANGE_MIN)
+            abs_enabled = bool(self._abs_range_filter_enabled)
             centers_all = list(self._spot_centers_all)
             phi_all = list(self._spot_phi_series_all) if self._spot_phi_series_all else []
             xy_all = list(self._spot_xy_series_all)
@@ -532,10 +435,20 @@ class BasicVideoPlayer:
             for i, series in enumerate(xy_all):
                 if self._ring_likeness_score(series) >= ring_thr:
                     keep.append(i)
+        ring_keep_n = len(keep)
+
+        if abs_enabled:
+            keep = [i for i in keep if self._spot_xy_max_axis_range(xy_all[i]) > abs_thr]
 
         prev_n = len(centers_all)
         if not keep:
-            msg = f"Ring filter kept 0/{prev_n} (min={ring_thr:.2f})."
+            if abs_enabled:
+                msg = (
+                    f"Filters kept 0/{prev_n} "
+                    f"(ring {ring_keep_n}/{prev_n}, max(range(X),range(Y))>{abs_thr:.2f})."
+                )
+            else:
+                msg = f"Ring filter kept 0/{prev_n} (min={ring_thr:.2f})."
             self._ui_call(self.bottom_var.set, msg)
             if not force:
                 return
@@ -594,7 +507,13 @@ class BasicVideoPlayer:
                 for _ in self._spot_centers
             ]
 
-        msg = f"Ring filter kept {len(keep)}/{prev_n} (min={ring_thr:.2f})."
+        if abs_enabled:
+            msg = (
+                f"Filters kept {len(keep)}/{prev_n} "
+                f"(ring {ring_keep_n}/{prev_n}, max(range(X),range(Y))>{abs_thr:.2f})."
+            )
+        else:
+            msg = f"Ring filter kept {len(keep)}/{prev_n} (min={ring_thr:.2f})."
         self._ui_call(self.bottom_var.set, msg)
         self._ui_call(self._rebuild_smap_overlay)
         # If enabled, apply directionality filtering after hollowness filtering.
@@ -961,6 +880,12 @@ class BasicVideoPlayer:
         # Clear directionality filter base snapshot.
         self._dir_filter_base = ([], [], [])
         self._dir_filter_enabled = bool(self._dir_filter_enabled_var.get())
+        self._abs_range_filter_enabled = bool(self._abs_range_filter_enabled_var.get())
+        self._auto_inspect_enabled = bool(self._auto_inspect_enabled_var.get())
+        with self._auto_inspect_start_lock:
+            self._auto_inspect_running = False
+        self._analysis_finished = False
+        self._spot_inspect_overrides = {}
         # Clear flat-field cache (profile depends on input frame shape).
         self._flat_profile = None
         self._flat_inv = None
@@ -977,6 +902,14 @@ class BasicVideoPlayer:
         self._dir_filter_enabled_var = tk.BooleanVar(value=False)
         self._dir_filter_enabled = False
         self._dir_filter_base = ([], [], [])
+        self._abs_range_filter_enabled_var = tk.BooleanVar(value=True)
+        self._abs_range_filter_enabled = True
+        self._auto_inspect_enabled_var = tk.BooleanVar(value=False)
+        self._auto_inspect_enabled = False
+        self._auto_inspect_chk = None
+        self._auto_inspect_running = False
+        self._auto_inspect_start_lock = threading.Lock()
+        self._analysis_finished = False
         # Flat-field / illumination correction
         self._flat_field_enabled_var = tk.BooleanVar(value=False)
         self._flat_field_enabled = False
@@ -987,9 +920,9 @@ class BasicVideoPlayer:
         # Fetch-frames controls
         self._fetch_busy = False
         self._fetch_sync_lock = False
-        self._fetch_exp_ms_var = tk.StringVar(value="0.05")
-        self._fetch_fps_var = tk.StringVar(value="1000")
-        self._fetch_n_var = tk.StringVar(value="100")
+        self._fetch_exp_ms_var = tk.StringVar(value="0.02")
+        self._fetch_fps_var = tk.StringVar(value="78")
+        self._fetch_n_var = tk.StringVar(value="150")
         self._fetch_dur_var = tk.StringVar(value="")
         self._fetch_btn = None
         self._sync_fetch_from("fps")
@@ -1021,9 +954,10 @@ class BasicVideoPlayer:
         self._spotrec_proc = None
         self._spotrec_stop_flag = None
         self._spotrec_out_path = None
-        self._spotrec_fps_var = tk.StringVar(value="200.0")
-        self._spotrec_exp_ms_var = tk.StringVar(value="0.05")
-        self._spotrec_size_var = tk.StringVar(value="7")
+        self._spotrec_roi_meta = None
+        self._spotrec_fps_var = tk.StringVar(value="2000")
+        self._spotrec_exp_ms_var = tk.StringVar(value="0.02")
+        self._spotrec_size_var = tk.StringVar(value="11")
         self._spotrec_spot_var = tk.StringVar(value="Spot - / -")
         self._spotrec_status_var = tk.StringVar(value="Idle")
         self._spotrec_progress_var = tk.StringVar(value="")
@@ -1035,6 +969,10 @@ class BasicVideoPlayer:
         self._spotrec_preview_label = None
         self._spotrec_preview_scale = 10
         self._spotrec_preview_size = 19
+        self._spotrec_preview_after_id = None
+        self._spotrec_preview_interval_ms = 100  # ~10 fps
+        self._spotrec_preview_frame_i = 0
+        self._spot_play_btn = None
         self._spotrec_center_offset = (0, 0)
         self._spotrec_xy_label = None
         self._spotrec_phi_label = None
@@ -1050,7 +988,7 @@ class BasicVideoPlayer:
         self._live_start_btn = None
         self._live_stop_btn = None
         self._live_exp_ms_var = tk.StringVar(value="0.05")
-        self._live_gain_var = tk.StringVar(value="0.0")
+        self._live_gain_var = tk.StringVar(value="20")
         self._live_status_var = tk.StringVar(value="Live feed stopped")
         self._live_mag_enabled_var = tk.BooleanVar(value=False)
         self._live_zoom_var = tk.StringVar(value="3.0")
@@ -1104,6 +1042,7 @@ class BasicVideoPlayer:
         self._spot_window_cache = []
         self._spot_window_cache_size = None
         self._spot_view_cache = []
+        self._spot_inspect_overrides = {}
         # S-map overview canvas (background + overlay items)
         self._smap_canvas = None
         self._smap_bg_ref = None
@@ -1310,7 +1249,8 @@ class BasicVideoPlayer:
         self.spot_next_btn.pack(side=tk.LEFT, padx=(4, 0))
         self._spot_status_var = tk.StringVar(value="Spot 0 / 0")
         ttk.Label(nav, textvariable=self._spot_status_var).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(nav, text="Play spot", command=self._open_spot_playback).pack(side=tk.RIGHT)
+        self._spot_play_btn = ttk.Button(nav, text="Play spot", command=self._open_spot_playback)
+        self._spot_play_btn.pack(side=tk.RIGHT)
 
         params = ttk.Frame(controls)
         params.pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
@@ -1325,6 +1265,20 @@ class BasicVideoPlayer:
         ttk.Label(params, text="Min Hollowness Score").grid(row=2, column=0, sticky="w", pady=(6, 0))
         self._ring_score_min_var = tk.StringVar(value=f"{self._ring_score_min:.2f}")
         ttk.Entry(params, textvariable=self._ring_score_min_var, width=10).grid(row=2, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
+        ttk.Checkbutton(
+            params,
+            text=f"Filter max(range(X), range(Y)) > {self.ABS_RANGE_MIN:.2f}",
+            variable=self._abs_range_filter_enabled_var,
+            command=self._on_abs_range_filter_toggle,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._auto_inspect_chk = ttk.Checkbutton(
+            params,
+            text=f"Auto inspect top {self.AUTO_INSPECT_TOP_N} spots after analysis",
+            variable=self._auto_inspect_enabled_var,
+            command=self._on_auto_inspect_toggle,
+        )
+        self._auto_inspect_chk.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self._auto_inspect_chk.state(["disabled"])
 
         self._spot_update_btn = ttk.Button(controls, text="Update analysis", command=self._apply_spot_params)
         self._spot_update_btn.pack(side=tk.TOP, anchor="w", pady=(8, 0))
@@ -1384,7 +1338,7 @@ class BasicVideoPlayer:
         ttk.Entry(top, textvariable=self._spotrec_fps_var, width=7).pack(side=tk.LEFT)
         ttk.Label(top, text="Exp (ms)").pack(side=tk.LEFT, padx=(12, 0))
         ttk.Entry(top, textvariable=self._spotrec_exp_ms_var, width=7).pack(side=tk.LEFT)
-        ttk.Label(top, text="ROI px").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(top, text="ROI size (sensor px)").pack(side=tk.LEFT, padx=(12, 0))
         ttk.Entry(top, textvariable=self._spotrec_size_var, width=5).pack(side=tk.LEFT)
 
         self._spotrec_save_btn = ttk.Button(top, text="Save recording", command=self._spotrec_save)
@@ -1441,6 +1395,9 @@ class BasicVideoPlayer:
             self._stop_live_feed()
         if current != str(getattr(self, "_spotrec_tab", "")):
             self._stop_spotrec()
+            self._stop_spotrec_preview_loop()
+        else:
+            self._start_spotrec_preview_loop()
 
     def _live_on_frame(self, arr_obj: object) -> None:
         if not self._live_running:
@@ -1587,8 +1544,10 @@ class BasicVideoPlayer:
                 img = Image.fromarray(frame)
                 try:
                     resample = Image.Resampling.BILINEAR
+                    zoom_resample = Image.Resampling.NEAREST
                 except Exception:
                     resample = Image.BILINEAR
+                    zoom_resample = Image.NEAREST
                 w = int(self._live_img_label.winfo_width())
                 h = int(self._live_img_label.winfo_height())
                 if w > 10 and h > 10:
@@ -1641,7 +1600,7 @@ class BasicVideoPlayer:
 
                         if self._live_zoom_label is not None:
                             crop = Image.fromarray(frame[y0:y1, x0:x1])
-                            zoom_img = crop.resize((out_sz, out_sz), resample=resample)
+                            zoom_img = crop.resize((out_sz, out_sz), resample=zoom_resample)
                             zoom_photo = ImageTk.PhotoImage(zoom_img)
                             self._live_zoom_label.configure(image=zoom_photo)
                             self._live_zoom_label.image = zoom_photo
@@ -1692,17 +1651,65 @@ class BasicVideoPlayer:
             self._spotrec_start_btn.state(["!disabled"])
         self._spotrec_update_preview()
 
-    def _spotrec_update_preview(self) -> None:
+    def _start_spotrec_preview_loop(self) -> None:
+        if self._spotrec_preview_after_id is not None:
+            return
+        self._spotrec_preview_tick()
+
+    def _stop_spotrec_preview_loop(self) -> None:
+        if self._spotrec_preview_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._spotrec_preview_after_id)
+        except Exception:
+            pass
+        self._spotrec_preview_after_id = None
+
+    def _spotrec_preview_tick(self) -> None:
+        self._spotrec_preview_after_id = None
+        try:
+            if hasattr(self, "_notebook"):
+                current = self._notebook.select()
+                if current != str(getattr(self, "_spotrec_tab", "")):
+                    return
+        except Exception:
+            return
+
+        frame = None
+        total = int(self._playback_frame_count())
+        if total > 0:
+            i = int(self._spotrec_preview_frame_i) % total
+            frame = self._get_playback_gray_frame(i)
+            self._spotrec_preview_frame_i = (i + 1) % max(1, total)
+        elif self.last_frame_gray is not None:
+            frame = self.last_frame_gray
+        self._spotrec_update_preview(gray_frame=frame)
+        self._spotrec_preview_after_id = self.root.after(
+            int(self._spotrec_preview_interval_ms),
+            self._spotrec_preview_tick,
+        )
+
+    def _spotrec_update_preview(self, gray_frame: Optional[np.ndarray] = None) -> None:
         if self._spotrec_preview_label is None:
             return
-        if not self._spot_centers or self._s_map is None:
+        if not self._spot_centers:
             self._spotrec_preview_label.configure(image="")
             return
         idx = max(0, min(self._spot_idx, len(self._spot_centers) - 1))
         cx, cy = self._spot_centers[idx]
 
         win = int(self._spotrec_preview_size)
-        window = self._extract_window(self._s_map, cx, cy, win)
+        src = None
+        if gray_frame is not None and getattr(gray_frame, "ndim", 0) == 2:
+            src = gray_frame
+        elif self.last_frame_gray is not None and getattr(self.last_frame_gray, "ndim", 0) == 2:
+            src = self.last_frame_gray
+        elif self._s_map is not None:
+            src = self._s_map
+        if src is None:
+            self._spotrec_preview_label.configure(image="")
+            return
+        window = self._extract_window(src, cx, cy, win)
         u8 = detect_spinners.to_u8_preview(window, lo_pct=0.0, hi_pct=100.0)
 
         roi = self._parse_int(self._spotrec_size_var.get()) or 7
@@ -1724,15 +1731,39 @@ class BasicVideoPlayer:
         x1 = x0 + roi - 1
         y1 = y0 + roi - 1
 
-        img = Image.fromarray(u8).convert("RGB")
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([x0, y0, x1, y1], outline=(255, 0, 0), width=1)
-
         scale = int(self._spotrec_preview_scale)
+        img = Image.fromarray(u8).convert("RGB")
         img = img.resize((win * scale, win * scale), resample=Image.NEAREST)
+        # Draw ROI box on the scaled preview so the border doesn't expand with zoom.
+        sx0 = x0 * scale
+        sy0 = y0 * scale
+        sx1 = (x1 + 1) * scale - 1
+        sy1 = (y1 + 1) * scale - 1
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([sx0, sy0, sx1, sy1], outline=(255, 0, 0), width=1)
+        # Debug overlay: actual ROI + phase.
+        meta = getattr(self, "_spotrec_roi_meta", None)
+        if meta is not None:
+            try:
+                px = int(meta.get("phase_x", int(meta.get("x", 0)) % 2))
+                py = int(meta.get("phase_y", int(meta.get("y", 0)) % 2))
+                txt = f"ROI {int(meta.get('w', 0))}x{int(meta.get('h', 0))} @ ({int(meta.get('x', 0))},{int(meta.get('y', 0))})  phase {px},{py}"
+                draw2 = ImageDraw.Draw(img)
+                draw2.rectangle([0, img.height - 14, img.width, img.height], fill=(0, 0, 0))
+                draw2.text((2, img.height - 12), txt, fill=(255, 255, 255))
+            except Exception:
+                pass
         photo = ImageTk.PhotoImage(img)
         self._spotrec_preview_label.configure(image=photo)
         self._spotrec_preview_label.image = photo
+
+    def _set_spot_playback_enabled(self, enabled: bool) -> None:
+        if self._spot_play_btn is None:
+            return
+        if enabled:
+            self._spot_play_btn.configure(state=tk.NORMAL)
+        else:
+            self._spot_play_btn.configure(state=tk.DISABLED)
 
     def _on_spotrec_preview_click(self, event) -> None:
         if not self._spot_centers:
@@ -1782,10 +1813,21 @@ class BasicVideoPlayer:
             g = gray[..., 0]
         else:
             g = gray
-        I90 = g[0::2, 0::2]
-        I45 = g[0::2, 1::2]
-        I135 = g[1::2, 0::2]
-        I0 = g[1::2, 1::2]
+        meta = getattr(self, "_spotrec_roi_meta", None)
+        px = 0
+        py = 0
+        if meta is not None:
+            try:
+                px = int(meta.get("phase_x", int(meta.get("x", 0)) % 2)) % 2
+                py = int(meta.get("phase_y", int(meta.get("y", 0)) % 2)) % 2
+            except Exception:
+                px = 0
+                py = 0
+
+        I90 = g[py::2, px::2]
+        I45 = g[py::2, (1 - px) :: 2]
+        I135 = g[(1 - py) :: 2, px::2]
+        I0 = g[(1 - py) :: 2, (1 - px) :: 2]
 
         ih, iw = I0.shape
         win_raw = self._parse_int(self._spotrec_size_var.get()) or 7
@@ -1794,8 +1836,19 @@ class BasicVideoPlayer:
         if win % 2 == 0:
             win += 1
         half = win // 2
+        # Default to ROI center, but prefer the recorded spot center if we know it.
         cx = iw // 2
         cy = ih // 2
+        meta = getattr(self, "_spotrec_roi_meta", None)
+        if meta is not None:
+            try:
+                # Compute spot center in this ROI using full-res coordinates.
+                cx_rel = float(meta["cx"]) - float(meta["x"])
+                cy_rel = float(meta["cy"]) - float(meta["y"])
+                cx = int(round(cx_rel / 2.0))
+                cy = int(round(cy_rel / 2.0))
+            except Exception:
+                pass
         x0 = max(0, cx - half)
         x1 = min(iw, cx + half + 1)
         y0 = max(0, cy - half)
@@ -1854,11 +1907,17 @@ class BasicVideoPlayer:
         w_user = max(1, int(w_user))
         if w_user % 2 == 0:
             w_user += 1
-        h_user = w_user
+        # Ensure camera ROI is large enough to support the same intensity-plane window
+        # used in tab-2 (which is based on the requested full-res window size).
+        win_int = int(round(w_user / 2.0))
+        if win_int % 2 == 0:
+            win_int += 1
+        w_cam = max(w_user, (2 * win_int + 1))
+        h_cam = w_cam
         cx2 = float(cx) + float(off_x)
         cy2 = float(cy) + float(off_y)
-        x = int(round(cx2)) - (w_user // 2)
-        y = int(round(cy2)) - (h_user // 2)
+        x = int(round(cx2)) - (w_cam // 2)
+        y = int(round(cy2)) - (h_cam // 2)
         if (x % 2) != 0:
             x -= 1
         if (y % 2) != 0:
@@ -1887,8 +1946,8 @@ class BasicVideoPlayer:
             "--roi",
             str(x),
             str(y),
-            str(w_user),
-            str(h_user),
+            str(w_cam),
+            str(h_cam),
             "--fps",
             str(float(fps)),
             "--exp-ms",
@@ -1897,7 +1956,7 @@ class BasicVideoPlayer:
             str(stop_flag),
             "--json",
             "--n-frames",
-            "100000",
+            "1000000",
         ]
 
         try:
@@ -1914,6 +1973,17 @@ class BasicVideoPlayer:
         self._spotrec_proc = proc
         self._spotrec_stop_flag = stop_flag
         self._spotrec_out_path = out_path
+        self._spotrec_roi_meta = {
+            "x": int(x),
+            "y": int(y),
+            "w": int(w_cam),
+            "h": int(h_cam),
+            "cx": float(cx2),
+            "cy": float(cy2),
+            "win_raw": int(w_user),
+            "phase_x": int(x) % 2,
+            "phase_y": int(y) % 2,
+        }
         self._spotrec_xy_series = []
         self._spotrec_phi_series = []
         self._spotrec_frames = []
@@ -1983,6 +2053,7 @@ class BasicVideoPlayer:
                 path = Path(str(data.get("path", "")))
                 actual_fps = data.get("actual_fps")
                 actual_fps = float(actual_fps) if actual_fps is not None else None
+                roi = data.get("roi")
             except Exception as e:
                 self._ui_call(messagebox.showerror, "Spot examine", f"Bad output: {e}")
                 if self._spotrec_start_btn is not None:
@@ -2021,6 +2092,25 @@ class BasicVideoPlayer:
                 self._spotrec_actual_fps = actual_fps
                 if self._spotrec_actual_fps and self._spotrec_actual_fps > 0.0:
                     self._spotrec_fps_var.set(f"{float(self._spotrec_actual_fps):.3f}")
+                # Update ROI meta from actual camera readback.
+                if isinstance(roi, dict) and self._spotrec_roi_meta is not None:
+                    try:
+                        rx = roi.get("OffsetX", roi.get("x"))
+                        ry = roi.get("OffsetY", roi.get("y"))
+                        rw = roi.get("Width", roi.get("w"))
+                        rh = roi.get("Height", roi.get("h"))
+                        if rx is not None:
+                            self._spotrec_roi_meta["x"] = int(round(float(rx)))
+                        if ry is not None:
+                            self._spotrec_roi_meta["y"] = int(round(float(ry)))
+                        if rw is not None:
+                            self._spotrec_roi_meta["w"] = int(round(float(rw)))
+                        if rh is not None:
+                            self._spotrec_roi_meta["h"] = int(round(float(rh)))
+                        self._spotrec_roi_meta["phase_x"] = int(self._spotrec_roi_meta.get("x", 0)) % 2
+                        self._spotrec_roi_meta["phase_y"] = int(self._spotrec_roi_meta.get("y", 0)) % 2
+                    except Exception:
+                        pass
                 self._spotrec_xy_series = xy_series
                 self._spotrec_phi_series = phi_series
                 self._spotrec_tmp_path = path
@@ -2334,6 +2424,277 @@ class BasicVideoPlayer:
         range_y = float(np.max(y) - np.min(y))
         return (range_x * range_x) + (range_y * range_y)
 
+    def _spot_xy_max_axis_range(self, series: list[tuple[float, float]]) -> float:
+        if not series:
+            return float("-inf")
+        arr = np.asarray(series, dtype=np.float32)
+        if arr.size == 0:
+            return float("-inf")
+        x = arr[:, 0]
+        y = arr[:, 1]
+        range_x = float(np.max(x) - np.min(x))
+        range_y = float(np.max(y) - np.min(y))
+        return max(range_x, range_y)
+
+    def _spot_center_key(self, center: tuple[float, float]) -> tuple[int, int]:
+        cx, cy = center
+        return (int(round(float(cx))), int(round(float(cy))))
+
+    def _capture_auto_spot_series(
+        self,
+        center: tuple[float, float],
+        n_frames: int,
+        roi_raw: int,
+        exp_ms: Optional[float],
+    ) -> tuple[list[tuple[float, float]], list[float], Optional[float], int]:
+        cx, cy = center
+        roi_raw = max(1, int(roi_raw))
+        if roi_raw % 2 == 0:
+            roi_raw += 1
+
+        # Fixed FOV for auto inspection.
+        w_cam = int(roi_raw)
+        h_cam = int(roi_raw)
+        x = int(round(float(cx))) - (w_cam // 2)
+        y = int(round(float(cy))) - (h_cam // 2)
+        if (x % 2) != 0:
+            x -= 1
+        if (y % 2) != 0:
+            y -= 1
+        x = max(0, x)
+        y = max(0, y)
+
+        out_dir = Path.cwd() / "spotrec_runs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        token = f"{time.strftime('%Y%m%d-%H%M%S')}_{time.time_ns()}"
+        key = self._spot_center_key(center)
+        out_path = out_dir / f"auto_spot_{key[0]}_{key[1]}_{token}.npy"
+        n_frames = max(1, int(n_frames))
+
+        script = Path(__file__).resolve().parent / "fetch_frames.py"
+        args = [
+            sys.executable,
+            str(script),
+            "--out-dir",
+            str(out_dir),
+            "--out-path",
+            str(out_path),
+            "--roi",
+            str(x),
+            str(y),
+            str(w_cam),
+            str(h_cam),
+            "--json",
+            "--n-frames",
+            str(n_frames),
+            "--stop-after",
+            str(n_frames),
+            "--fps",
+            str(float(self.AUTO_INSPECT_FPS)),
+        ]
+        # Use a fixed auto-inspection frame rate.
+        if exp_ms is not None and float(exp_ms) > 0.0:
+            args.extend(["--exp-ms", str(float(exp_ms))])
+
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            out, err = proc.communicate(timeout=300.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+            raise RuntimeError((err or out or "Auto inspect capture timed out.").strip())
+
+        if proc.returncode != 0:
+            raise RuntimeError((err or out or "Auto inspect capture failed.").strip())
+
+        payload = (out or "").strip().splitlines()
+        if not payload:
+            raise RuntimeError("Auto inspect recorder produced no output.")
+        try:
+            data = json.loads(payload[-1])
+            path = Path(str(data.get("path", "")))
+            actual_fps = data.get("actual_fps")
+            actual_fps = float(actual_fps) if actual_fps is not None else None
+            roi = data.get("roi")
+        except Exception as e:
+            raise RuntimeError(f"Auto inspect output parse failed: {e}")
+        if not path.exists():
+            raise RuntimeError("Auto inspect recording file missing.")
+
+        try:
+            arr = np.load(path, allow_pickle=False)
+        except Exception as e:
+            raise RuntimeError(f"Auto inspect could not load capture: {e}")
+        finally:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        total = int(arr.shape[0]) if arr.ndim >= 3 else 0
+        if total <= 0:
+            return ([], [], actual_fps, 0)
+
+        roi_meta = {
+            "x": int(x),
+            "y": int(y),
+            "w": int(w_cam),
+            "h": int(h_cam),
+            "cx": float(cx),
+            "cy": float(cy),
+            "win_raw": int(roi_raw),
+            "phase_x": int(x) % 2,
+            "phase_y": int(y) % 2,
+        }
+        if isinstance(roi, dict):
+            try:
+                rx = roi.get("OffsetX", roi.get("x"))
+                ry = roi.get("OffsetY", roi.get("y"))
+                rw = roi.get("Width", roi.get("w"))
+                rh = roi.get("Height", roi.get("h"))
+                if rx is not None:
+                    roi_meta["x"] = int(round(float(rx)))
+                if ry is not None:
+                    roi_meta["y"] = int(round(float(ry)))
+                if rw is not None:
+                    roi_meta["w"] = int(round(float(rw)))
+                if rh is not None:
+                    roi_meta["h"] = int(round(float(rh)))
+                roi_meta["phase_x"] = int(roi_meta.get("x", 0)) % 2
+                roi_meta["phase_y"] = int(roi_meta.get("y", 0)) % 2
+            except Exception:
+                pass
+
+        xy_series: list[tuple[float, float]] = []
+        phi_series: list[float] = []
+        win_raw = int(roi_meta.get("win_raw", roi_raw))
+        win_raw = max(1, int(win_raw))
+        win = max(1, int(round(win_raw / 2.0)))
+        if win % 2 == 0:
+            win += 1
+        half = win // 2
+        eps = 1e-6
+        px = int(roi_meta.get("phase_x", int(roi_meta.get("x", 0)) % 2)) % 2
+        py = int(roi_meta.get("phase_y", int(roi_meta.get("y", 0)) % 2)) % 2
+        cx_rel = float(roi_meta.get("cx", cx)) - float(roi_meta.get("x", x))
+        cy_rel = float(roi_meta.get("cy", cy)) - float(roi_meta.get("y", y))
+        cx_i = int(round(cx_rel / 2.0))
+        cy_i = int(round(cy_rel / 2.0))
+
+        for i in range(total):
+            g = arr[i]
+            if g.ndim != 2:
+                g = g[..., 0]
+            I90 = g[py::2, px::2]
+            I45 = g[py::2, (1 - px) :: 2]
+            I135 = g[(1 - py) :: 2, px::2]
+            I0 = g[(1 - py) :: 2, (1 - px) :: 2]
+
+            ih, iw = I0.shape
+            if ih <= 0 or iw <= 0:
+                continue
+            x0 = max(0, cx_i - half)
+            x1 = min(iw, cx_i + half + 1)
+            y0 = max(0, cy_i - half)
+            y1 = min(ih, cy_i + half + 1)
+
+            a0 = I0[y0:y1, x0:x1]
+            a90 = I90[y0:y1, x0:x1]
+            a45 = I45[y0:y1, x0:x1]
+            a135 = I135[y0:y1, x0:x1]
+            m0 = float(a0.mean()) if a0.size else 0.0
+            m90 = float(a90.mean()) if a90.size else 0.0
+            m45 = float(a45.mean()) if a45.size else 0.0
+            m135 = float(a135.mean()) if a135.size else 0.0
+            x_v = (m0 - m90) / (m0 + m90 + eps)
+            y_v = (m45 - m135) / (m45 + m135 + eps)
+            xy_series.append((float(x_v), float(y_v)))
+            phi_series.append(float(0.5 * np.arctan2(y_v, x_v)))
+
+        return (xy_series, phi_series, actual_fps, len(phi_series))
+
+    def _auto_inspect_top_spots(self) -> int:
+        with self._analysis_lock:
+            spots = list(self._spot_centers[: int(self.AUTO_INSPECT_TOP_N)])
+        if not spots:
+            return 0
+
+        exp_ms = 0.02
+        n_frames = int(self.AUTO_INSPECT_FRAMES)
+        roi_raw = int(self.AUTO_INSPECT_ROI_RAW)
+        total = len(spots)
+        updated = 0
+        self._ui_call(
+            self.bottom_var.set,
+            f"Auto inspect: {total} spot(s), {n_frames} frame(s) each, ROI {roi_raw}x{roi_raw}.",
+        )
+
+        for i, center in enumerate(spots, start=1):
+            self._ui_call(self.bottom_var.set, f"Auto inspect {i}/{total} in progress...")
+            try:
+                xy, phi, fps, n = self._capture_auto_spot_series(
+                    center=center,
+                    n_frames=n_frames,
+                    roi_raw=roi_raw,
+                    exp_ms=exp_ms,
+                )
+            except Exception as e:
+                _append_timing_log(f"[SpotAnalysis] Auto inspect spot {i}/{total} failed: {e}")
+                continue
+            if not xy or not phi or n <= 0:
+                continue
+            key = self._spot_center_key(center)
+            with self._analysis_lock:
+                self._spot_inspect_overrides[key] = {
+                    "xy": list(xy),
+                    "phi": list(phi),
+                    "fps": float(fps) if fps is not None and fps > 0.0 else None,
+                }
+                # Invalidate cached plots so UI redraw picks up improved series immediately.
+                self._spot_view_cache = []
+            updated += 1
+            if fps is not None and fps > 0.0:
+                msg = f"Auto inspect {i}/{total}: {n} frames at {float(fps):.1f} fps."
+            else:
+                msg = f"Auto inspect {i}/{total}: {n} frames."
+            self._ui_call(self.bottom_var.set, msg)
+            self._ui_call(self._update_spot_view)
+
+        if updated > 0:
+            self._ui_call(self.bottom_var.set, f"Auto inspect complete: updated {updated}/{total} spots.")
+        else:
+            self._ui_call(self.bottom_var.set, "Auto inspect complete: no spots updated.")
+        return updated
+
+    def _start_auto_inspect_async(self) -> bool:
+        with self._auto_inspect_start_lock:
+            if self._auto_inspect_running:
+                self._ui_call(self.bottom_var.set, "Auto inspect already running.")
+                return False
+            with self._analysis_lock:
+                has_spots = bool(self._spot_centers)
+            if not has_spots:
+                self._ui_call(self.bottom_var.set, "Auto inspect: no spots available.")
+                return False
+            self._auto_inspect_running = True
+
+        def _worker():
+            t_auto = time.perf_counter()
+            try:
+                self._auto_inspect_top_spots()
+            finally:
+                _append_timing_log(f"[SpotAnalysis] Auto inspect: {time.perf_counter() - t_auto:.3f}s")
+                with self._auto_inspect_start_lock:
+                    self._auto_inspect_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+
     def _sort_spots_by_xy_range(self) -> None:
         if not self._spot_centers or not self._spot_xy_series:
             return
@@ -2460,9 +2821,12 @@ class BasicVideoPlayer:
         if s_map_int is not None and centers_full:
             scored: list[tuple[float, tuple[float, float]]] = []
             h_int, w_int = s_map_int.shape
+            h_full, w_full = s_map_full.shape
+            sx = (float(w_int - 1) / float(max(1, w_full - 1))) if w_int > 1 else 0.0
+            sy = (float(h_int - 1) / float(max(1, h_full - 1))) if h_int > 1 else 0.0
             for cx, cy in centers_full:
-                ix = int(round(cx / 2.0))
-                iy = int(round(cy / 2.0))
+                ix = int(round(float(cx) * sx))
+                iy = int(round(float(cy) * sy))
                 if 0 <= ix < w_int and 0 <= iy < h_int:
                     s_val = float(s_map_int[iy, ix])
                 else:
@@ -2475,6 +2839,7 @@ class BasicVideoPlayer:
         self._s_map_int = s_map_int
         self._spot_centers_all = centers_full
         self._spot_centers = list(centers_full)
+        self._spot_inspect_overrides = {}
         self._spot_idx = 0
         self._spot_window_cache = [None for _ in centers_full]
         self._spot_window_cache_size = int(self._spot_window_size)
@@ -3119,6 +3484,7 @@ class BasicVideoPlayer:
 
         centers = self._find_centers_on_s_map(self._s_map)
         self._spot_idx = 0
+        self._spot_inspect_overrides = {}
         self._recompute_xy_series(centers=centers)
         self._apply_ring_filter(force=True)
         self._show_st2_popup(self._s_map)
@@ -3151,6 +3517,7 @@ class BasicVideoPlayer:
         n = len(self._spot_centers)
         self.spot_prev_btn.configure(state=tk.NORMAL)
         self.spot_next_btn.configure(state=tk.NORMAL)
+        self._set_spot_playback_enabled(True)
         self._spot_idx = max(0, min(self._spot_idx, n - 1))
         cx, cy = self._spot_centers[self._spot_idx]
         self._update_spotrec_label()
@@ -3189,42 +3556,66 @@ class BasicVideoPlayer:
         self._spot_img_label.configure(image=spot_img_tk)
         self._spot_img_ref = spot_img_tk
 
+        spot_key = self._spot_center_key((cx, cy))
+        plot_fps = float(self.source_fps)
         with self._analysis_lock:
-            phi_series = (
-                list(self._spot_phi_series[self._spot_idx]) if self._spot_phi_series else []
-            )
+            phi_series = list(self._spot_phi_series[self._spot_idx]) if self._spot_phi_series else []
+            xy_series = list(self._spot_xy_series[self._spot_idx]) if self._spot_xy_series else []
+            over = self._spot_inspect_overrides.get(spot_key)
+            if isinstance(over, dict):
+                over_phi = over.get("phi")
+                over_xy = over.get("xy")
+                over_fps = over.get("fps")
+                if isinstance(over_phi, list):
+                    phi_series = list(over_phi)
+                if isinstance(over_xy, list):
+                    xy_series = list(over_xy)
+                if over_fps is not None:
+                    try:
+                        of = float(over_fps)
+                        if of > 0.0:
+                            plot_fps = of
+                    except Exception:
+                        pass
         cache_entry = None
         if self._spot_view_cache and len(self._spot_view_cache) == n:
             cache_entry = self._spot_view_cache[self._spot_idx]
+        fps_key = round(float(plot_fps), 6) if plot_fps and plot_fps > 0.0 else 0.0
         phi_len = len(phi_series)
         fft_img = None
-        if cache_entry is not None and cache_entry.get("phi_len") == phi_len:
+        if (
+            cache_entry is not None
+            and cache_entry.get("phi_len") == phi_len
+            and cache_entry.get("phi_fps") == fps_key
+        ):
             fft_img = cache_entry.get("fft")
         if fft_img is None:
-            fft_img = self._make_fft_image(phi_series, self.source_fps)
+            fft_img = self._make_fft_image(phi_series, plot_fps)
             if cache_entry is not None:
                 cache_entry["fft"] = fft_img
                 cache_entry["phi_len"] = phi_len
+                cache_entry["phi_fps"] = fps_key
         fft_img_tk = ImageTk.PhotoImage(fft_img)
         self._fft_img_label.configure(image=fft_img_tk)
         self._fft_img_ref = fft_img_tk
 
         phi_img = None
-        if cache_entry is not None and cache_entry.get("phi_len") == phi_len:
+        if (
+            cache_entry is not None
+            and cache_entry.get("phi_len") == phi_len
+            and cache_entry.get("phi_fps") == fps_key
+        ):
             phi_img = cache_entry.get("phi")
         if phi_img is None:
-            phi_img = self._make_phi_plot_image(phi_series, self.source_fps)
+            phi_img = self._make_phi_plot_image(phi_series, plot_fps)
             if cache_entry is not None:
                 cache_entry["phi"] = phi_img
                 cache_entry["phi_len"] = phi_len
+                cache_entry["phi_fps"] = fps_key
         phi_img_tk = ImageTk.PhotoImage(phi_img)
         self._phi_img_label.configure(image=phi_img_tk)
         self._phi_img_ref = phi_img_tk
 
-        with self._analysis_lock:
-            xy_series = (
-                list(self._spot_xy_series[self._spot_idx]) if self._spot_xy_series else []
-            )
         ring_score = self._ring_likeness_score(xy_series) if xy_series else 0.0
         xy_len = len(xy_series)
         xy_img = None
@@ -3255,12 +3646,16 @@ class BasicVideoPlayer:
                 dir_img = None
                 hand_img = None
                 b_val = None
-                if cache_entry is not None and cache_entry.get("dir_len") == xy_len:
+                if (
+                    cache_entry is not None
+                    and cache_entry.get("dir_len") == xy_len
+                    and cache_entry.get("dir_fps") == fps_key
+                ):
                     dir_img = cache_entry.get("dir_psd")
                     hand_img = cache_entry.get("dir_hand")
                     b_val = cache_entry.get("dir_B")
                 if dir_img is None or hand_img is None or b_val is None:
-                    m = self._directionality_metrics(xy_series, self.source_fps)
+                    m = self._directionality_metrics(xy_series, plot_fps)
                     if m is None:
                         self._dir_var.set("B: - (waiting for frames)")
                         if hasattr(self, "_dir_psd_label"):
@@ -3275,6 +3670,7 @@ class BasicVideoPlayer:
                         hand_img = self._make_handedness_image(m)
                         if cache_entry is not None:
                             cache_entry["dir_len"] = xy_len
+                            cache_entry["dir_fps"] = fps_key
                             cache_entry["dir_psd"] = dir_img
                             cache_entry["dir_hand"] = hand_img
                             cache_entry["dir_B"] = b_val
@@ -3564,6 +3960,22 @@ class BasicVideoPlayer:
         # Apply filtering on demand.
         self._apply_directionality_filter(force=True)
 
+    def _on_abs_range_filter_toggle(self) -> None:
+        self._abs_range_filter_enabled = bool(self._abs_range_filter_enabled_var.get())
+        if not self._spot_centers_all:
+            return
+        self._apply_ring_filter(force=True)
+        self._update_spot_view()
+
+    def _on_auto_inspect_toggle(self) -> None:
+        self._auto_inspect_enabled = bool(self._auto_inspect_enabled_var.get())
+        if not self._auto_inspect_enabled:
+            return
+        # If initial analysis already finished, start inspection immediately
+        # without rerunning the main analysis pipeline.
+        if bool(getattr(self, "_analysis_finished", False)):
+            self._start_auto_inspect_async()
+
     def _refresh_spot_playback_if_open(self) -> None:
         if self._play_popup is None:
             return
@@ -3647,8 +4059,16 @@ class BasicVideoPlayer:
 
     def _show_finished(self, show: bool):
         if not show:
+            self._analysis_finished = False
+            if self._auto_inspect_chk is not None:
+                self._auto_inspect_chk.state(["disabled"])
             self.bottom_var.set("")
             return
+        self._analysis_finished = True
+        if self._auto_inspect_chk is not None:
+            self._auto_inspect_chk.state(["!disabled"])
+        if bool(getattr(self, "_auto_inspect_enabled", False)):
+            self._start_auto_inspect_async()
         cur = self.bottom_var.get()
         if cur:
             # Preserve any warning/status message the analysis already set.
@@ -3790,6 +4210,7 @@ class BasicVideoPlayer:
 
     def _start_after_load(self, gray0: np.ndarray) -> None:
         self._show_finished(False)
+        self._analysis_finished = False
 
         if gray0 is None or gray0.ndim != 2:
             messagebox.showerror("Error", "Source frames must be 2D grayscale.")
@@ -3831,12 +4252,14 @@ class BasicVideoPlayer:
         self._spot_xy_series_all = []
         self._spot_xy_series = []
         self._spot_bounds_int_all = []
+        self._spot_inspect_overrides = {}
         self._spot_window_cache = []
         self._spot_window_cache_size = None
         self._spot_view_cache = []
         self._xy_frames_processed = 0
         self._phi_frames_processed = 0
         self._spot_idx = 0
+        self._spotrec_preview_frame_i = 0
         self._update_spot_view()
 
         # Start recon thread (consumes queue, processes EVERY frame)
@@ -3967,8 +4390,9 @@ class BasicVideoPlayer:
 
     def _recon_worker(self, shape: tuple[int, int]):
         # For the initial S-map, track per-pixel *unnormalised* anisotropy ranges
-        # over the first N frames (raw differences I0-I90 and I45-I135).
-        xy_recon = make_xy_reconstructor(shape, eps=1e-6, out_dtype=np.float32, normalize=False)
+        # over the first N frames in full-resolution intersection space.
+        qu_recon = make_qu_reconstructor(shape, out_dtype=np.float32)
+        t_recon_start = time.perf_counter()
         min_x_raw = max_x_raw = None
         min_y_raw = max_y_raw = None
         min_x_sm = max_x_sm = None
@@ -3990,9 +4414,9 @@ class BasicVideoPlayer:
 
                 # Buffer first N frames for initial S-map:
                 # S = range(X)^2 + range(Y)^2 over time (per pixel),
-                # where X=(I0-I90), Y=(I45-I135).
+                # where X/Y are Q/U on the intersection grid.
                 if (not self._st_popup_done) and (smap_frames_seen < self._st2_frames):
-                    X, Y = xy_recon(gray)
+                    X, Y = qu_recon(gray)
                     # Spatially average X and Y before range tracking (suppresses isolated noisy pixels).
                     if x_sm is None:
                         x_sm = np.empty_like(X)
@@ -4040,26 +4464,18 @@ class BasicVideoPlayer:
 
                     if smap_frames_seen == self._st2_frames:
                         try:
+                            t_stage = time.perf_counter()
                             s_full_raw, _s_int_raw = self._anisotropy_range_s_map(
                                 min_x_raw, max_x_raw, min_y_raw, max_y_raw, gray.shape
                             )
                             s_full, s_int = self._anisotropy_range_s_map(
                                 min_x_sm, max_x_sm, min_y_sm, max_y_sm, gray.shape
                             )
-                            try:
-                                detect_spinners.save_s_histogram(
-                                    s_int,
-                                    out_path=Path.cwd() / "S_map_hist.png",
-                                    title="S_map pixel distribution (range(unnormalised anisotropy) metric)",
-                                )
-                            except Exception as e:
-                                self._ui_call(
-                                    messagebox.showwarning,
-                                    "Histogram warning",
-                                    f"Could not save S_map histogram: {e}",
-                                )
-                            self._save_s_map_variants(s_full_raw, s_full)
+                            _append_timing_log(f"[SpotAnalysis] S-map compute: {time.perf_counter() - t_stage:.3f}s")
+                            # Diagnostics disabled: skip histogram + S-map variant saves.
+                            t_centers = time.perf_counter()
                             centers = self._find_centers_on_s_map(s_full)
+                            _append_timing_log(f"[SpotAnalysis] Find centers: {time.perf_counter() - t_centers:.3f}s")
                         except Exception as e:
                             self._ui_call(messagebox.showerror, "Spinner detect error", str(e))
                         else:
@@ -4070,7 +4486,9 @@ class BasicVideoPlayer:
                                 for (cx, cy) in centers
                                 if (m <= cx <= (w - 1 - m)) and (m <= cy <= (h - 1 - m))
                             ]
+                            t_init = time.perf_counter()
                             self._init_spot_analysis(s_full, s_int, centers)
+                            _append_timing_log(f"[SpotAnalysis] Init analysis: {time.perf_counter() - t_init:.3f}s")
                             self._st_popup_done = True
                             self._ui_call(self._show_st2_popup, s_full)
                             self._ui_call(self._update_spot_view)
@@ -4089,14 +4507,22 @@ class BasicVideoPlayer:
         if (not self._st_popup_done) and (smap_frames_seen >= 2) and (min_x_raw is not None):
             # Short clips: build S-map from whatever frames we got.
             try:
+                t_stage = time.perf_counter()
                 s_full_raw, _s_int_raw = self._anisotropy_range_s_map(
                     min_x_raw, max_x_raw, min_y_raw, max_y_raw, self.last_frame_gray.shape
                 )
                 s_full, s_int = self._anisotropy_range_s_map(
                     min_x_sm, max_x_sm, min_y_sm, max_y_sm, self.last_frame_gray.shape
                 )
-                self._save_s_map_variants(s_full_raw, s_full)
+                _append_timing_log(
+                    f"[SpotAnalysis] (short) S-map compute: {time.perf_counter() - t_stage:.3f}s"
+                )
+                # Diagnostics disabled: skip S-map variant saves.
+                t_centers = time.perf_counter()
                 centers = self._find_centers_on_s_map(s_full)
+                _append_timing_log(
+                    f"[SpotAnalysis] (short) Find centers: {time.perf_counter() - t_centers:.3f}s"
+                )
             except Exception:
                 centers = []
                 s_full = self._s_map
@@ -4108,18 +4534,25 @@ class BasicVideoPlayer:
                 for (cx, cy) in centers
                 if (m <= cx <= (w - 1 - m)) and (m <= cy <= (h - 1 - m))
             ]
+            t_init = time.perf_counter()
             self._init_spot_analysis(s_full, s_int, centers)
+            _append_timing_log(f"[SpotAnalysis] (short) Init analysis: {time.perf_counter() - t_init:.3f}s")
             self._st_popup_done = True
             self._ui_call(self._show_st2_popup, s_full)
             self._ui_call(self._update_spot_view)
 
         if self._spot_centers:
-            self._apply_ring_filter()
+            t_ring = time.perf_counter()
+            # Force one initial apply so default-checked filters are active
+            # without requiring a manual untick/tick cycle.
+            self._apply_ring_filter(force=True)
+            _append_timing_log(f"[SpotAnalysis] Ring filter: {time.perf_counter() - t_ring:.3f}s")
             # Overwrite S_map_spots.png with filtered "rotators" view at the end.
             if self._s_map is not None:
                 self._ui_call(self._show_st2_popup, self._s_map)
             self._ui_call(self._update_spot_view)
         self._ui_call(self._show_finished, True)
+        _append_timing_log(f"[SpotAnalysis] Total analysis time: {time.perf_counter() - t_recon_start:.3f}s")
 
     def _clear_queue(self):
         try:
@@ -4147,6 +4580,7 @@ class BasicVideoPlayer:
         # New-source safety: drop all cached images/buffers so repeated opens don't slow down.
         self._clear_all_caches()
         self._show_finished(False)
+        self._stop_spotrec_preview_loop()
 
         self._close_spot_playback()
 
@@ -4186,6 +4620,7 @@ class BasicVideoPlayer:
         self._spot_xy_series_all = []
         self._spot_xy_series = []
         self._spot_bounds_int_all = []
+        self._spot_inspect_overrides = {}
         self._spot_window_cache = []
         self._spot_window_cache_size = None
         self._spot_view_cache = []
@@ -4212,6 +4647,7 @@ class BasicVideoPlayer:
     def on_close(self):
         self._stop_live_feed()
         self._stop_spotrec()
+        self._stop_spotrec_preview_loop()
         self._close_video()
         self.root.destroy()
 

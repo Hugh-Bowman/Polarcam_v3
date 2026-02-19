@@ -1,0 +1,39 @@
+Polarcam Live venv setup (Python 3.13, 64-bit)
+=============================================
+
+Prereqs
+- Install 64-bit Python 3.13.
+- Install IDS peak SDK for your camera (vendor installer).
+  - Ensure the IDS Python bindings are installed (ids_peak, ids_peak_ipl, ids_peak_common).
+  - If the installer provides a “Python integration” option, enable it.
+
+Steps
+1) Open PowerShell and go to the repo root:
+   cd "C:\Polarcam Software\Polarcam_v3"
+
+2) (Optional) Remove any old venv:
+   rmdir /s /q venv
+
+3) Create a fresh venv with Python 3.13:
+   py -3.13 -m venv venv
+
+4) Upgrade pip (optional but recommended):
+   venv\Scripts\python.exe -m pip install --upgrade pip
+
+5) Install Python dependencies:
+   venv\Scripts\python.exe -m pip install -r "polarcam_live\requirements.txt"
+
+6) Launch the GUI:
+   venv\Scripts\python.exe "polarcam_live\Spinners_gui_live.py"
+
+Troubleshooting
+- If you see: "No matching distribution found for numpy", the machine cannot
+  reach PyPI or is blocked by a proxy. Fix internet/proxy settings or use an
+  internal package mirror. You can also install from local wheel files if you have them.
+
+- If you see a NumPy C-extension error (_multiarray_umath), the Python/NumPy
+  versions don’t match. Recreate the venv with Python 3.13 64-bit and reinstall.
+
+Notes
+- The live camera path requires the IDS peak SDK and its Python bindings.
+- If you do not need live camera control, you can skip the IDS SDK install.
