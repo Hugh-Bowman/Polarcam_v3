@@ -4,7 +4,8 @@ __pycache__/
 varmap_runs/
 cycles/
 captures/venv/
-
+venv/
+*.pyc
 # large data files
 *.npy
 *.avi
@@ -22,3 +23,6 @@ spotrec_runs/
 *.hdf5
 *.hdf
 *.hdf4
+
+*.debug.pak
+*.pak
