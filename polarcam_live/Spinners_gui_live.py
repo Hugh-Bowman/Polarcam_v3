@@ -1232,7 +1232,7 @@ class BasicVideoPlayer:
         dir_panel.bind("<Configure>", _dir_on_configure)
         dir_canvas.bind("<Configure>", _dir_on_configure)
 
-        # Left: main S_map overview (S_smoothed, scaled by 1/2) + overlay circles/labels.
+        # Left: main S_map overview (S_smoothed, scaled by 1/2) + overlay circles.
         self._smap_canvas = tk.Canvas(left, bg="black", highlightthickness=0)
         self._smap_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self._smap_canvas.bind("<Button-1>", self._on_smap_click)
@@ -2223,7 +2223,7 @@ class BasicVideoPlayer:
 
     def _on_smap_click(self, event) -> None:
         """
-        Click a numbered ring on the S-map overview to jump to that spot.
+        Click a spot ring on the S-map overview to jump to that spot.
         Uses nearest-center selection with a radius gate.
         """
         if self._smap_canvas is None or not self._spot_centers:
@@ -2253,6 +2253,7 @@ class BasicVideoPlayer:
 
         self._spot_idx = i
         self._update_spot_view()
+        self._rebuild_smap_overlay()
 
     def _smap_preview_u8(self, s_map: np.ndarray) -> np.ndarray:
         """
@@ -2330,7 +2331,7 @@ class BasicVideoPlayer:
         scale = float(self.S_MAP_DISPLAY_SCALE)
         r = float(self.S_MAP_RING_R) * scale
         # Build overlay incrementally to avoid UI freezes on many candidates.
-        # Pop from the end for O(1) per element (order doesn't matter for labels).
+        # Pop from the end for O(1) per element (order doesn't matter for rings).
         self._smap_overlay_pending = list(enumerate(self._spot_centers))
 
         def _tick():
@@ -2345,19 +2346,11 @@ class BasicVideoPlayer:
                 i, (cx, cy) = self._smap_overlay_pending.pop()
                 x = float(cx) * scale
                 y = float(cy) * scale
+                color = "#00cc44" if i == int(self._spot_idx) else "#ff3333"
                 ring_id = self._smap_canvas.create_oval(
-                    x - r, y - r, x + r, y + r, outline="#ff3333", width=2
-                )
-                text_id = self._smap_canvas.create_text(
-                    x + r + 6,
-                    y - r - 2,
-                    text=str(i + 1),
-                    fill="#ff3333",
-                    anchor="nw",
-                    font=("TkDefaultFont", 12, "bold"),
+                    x - r, y - r, x + r, y + r, outline=color, width=2
                 )
                 self._smap_spot_ring_ids.append(ring_id)
-                self._smap_spot_text_ids.append(text_id)
             self._smap_overlay_after_id = self.root.after(1, _tick)
 
         self._smap_overlay_after_id = self.root.after(1, _tick)
@@ -3704,12 +3697,14 @@ class BasicVideoPlayer:
             return
         self._spot_idx = (self._spot_idx - 1) % len(self._spot_centers)
         self._update_spot_view()
+        self._rebuild_smap_overlay()
 
     def _next_spot(self) -> None:
         if not self._spot_centers:
             return
         self._spot_idx = (self._spot_idx + 1) % len(self._spot_centers)
         self._update_spot_view()
+        self._rebuild_smap_overlay()
 
     def _stop_spot_playback(self) -> None:
         self._play_running = False
