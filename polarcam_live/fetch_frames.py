@@ -32,6 +32,8 @@ def fetch_frames(
     roi: tuple[int, int, int, int] | None = None,
     stop_flag: Path | None = None,
     out_path: Path | None = None,
+    preview_path: Path | None = None,
+    preview_every: int | None = None,
 ) -> tuple[Path, float | None, int, dict | None]:
     app = QApplication.instance() or QApplication([])
     controller = Controller()
@@ -42,6 +44,21 @@ def fetch_frames(
     actual_roi: dict | None = None
     first_frame_seen = False
 
+    preview_every_n = int(preview_every) if preview_every is not None else None
+    if preview_every_n is not None and preview_every_n < 1:
+        preview_every_n = 1
+
+    def _write_preview(frame8: np.ndarray) -> None:
+        if preview_path is None:
+            return
+        try:
+            tmp = preview_path.with_suffix(preview_path.suffix + ".tmp")
+            with tmp.open("wb") as f:
+                np.save(f, frame8)
+            tmp.replace(preview_path)
+        except Exception:
+            return
+
     def _on_frame(arr_obj: object) -> None:
         nonlocal done, first_frame_seen
         if done:
@@ -49,6 +66,8 @@ def fetch_frames(
         frame16 = np.asarray(arr_obj, dtype=np.uint16, copy=True)
         frame8 = _as_uint8(frame16)
         collected.append(frame8)
+        if preview_every_n is not None and (len(collected) % preview_every_n) == 0:
+            _write_preview(frame8)
         first_frame_seen = True
         if stop_after is not None and len(collected) >= stop_after:
             done = True
@@ -163,6 +182,8 @@ def main() -> None:
     parser.add_argument("--roi", type=int, nargs=4, default=None, metavar=("X", "Y", "W", "H"))
     parser.add_argument("--stop-flag", default=None, help="Path to a stop-flag file")
     parser.add_argument("--out-path", default=None, help="Exact output .npy path")
+    parser.add_argument("--preview-path", default=None, help="Path to write a single-frame preview .npy")
+    parser.add_argument("--preview-every", type=int, default=None, help="Write preview every N frames")
     parser.add_argument("--json", action="store_true", help="Emit JSON with path and actual_fps")
     args = parser.parse_args()
 
@@ -175,6 +196,8 @@ def main() -> None:
         roi=tuple(args.roi) if args.roi else None,
         stop_flag=Path(args.stop_flag) if args.stop_flag else None,
         out_path=Path(args.out_path) if args.out_path else None,
+        preview_path=Path(args.preview_path) if args.preview_path else None,
+        preview_every=args.preview_every,
     )
     if args.json:
         print(json.dumps({"path": str(out_path), "actual_fps": actual_fps, "count": count, "roi": actual_roi}))

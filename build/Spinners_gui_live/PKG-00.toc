@@ -1,0 +1,74 @@
+('C:\\Polarcam '
+ 'Software\\Polarcam_v3\\build\\Spinners_gui_live\\Spinners_gui_live.pkg',
+ {'BINARY': True,
+  'DATA': True,
+  'EXECUTABLE': True,
+  'EXTENSION': True,
+  'PYMODULE': True,
+  'PYSOURCE': True,
+  'PYZ': False,
+  'SPLASH': True,
+  'SYMLINK': False},
+ [('pyi-contents-directory _internal', '', 'OPTION'),
+  ('PYZ-00.pyz',
+   'C:\\Polarcam Software\\Polarcam_v3\\build\\Spinners_gui_live\\PYZ-00.pyz',
+   'PYZ'),
+  ('struct',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\build\\Spinners_gui_live\\localpycs\\struct.pyc',
+   'PYMODULE'),
+  ('pyimod01_archive',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\build\\Spinners_gui_live\\localpycs\\pyimod01_archive.pyc',
+   'PYMODULE'),
+  ('pyimod02_importers',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\build\\Spinners_gui_live\\localpycs\\pyimod02_importers.pyc',
+   'PYMODULE'),
+  ('pyimod03_ctypes',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\build\\Spinners_gui_live\\localpycs\\pyimod03_ctypes.pyc',
+   'PYMODULE'),
+  ('pyimod04_pywin32',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\build\\Spinners_gui_live\\localpycs\\pyimod04_pywin32.pyc',
+   'PYMODULE'),
+  ('pyiboot01_bootstrap',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\venv\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
+   'PYSOURCE'),
+  ('pyi_rth_inspect',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
+   'PYSOURCE'),
+  ('pyi_rth_pyside6',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pyside6.py',
+   'PYSOURCE'),
+  ('pyi_rth_pkgutil',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'PYSOURCE'),
+  ('pyi_rth_multiprocessing',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py',
+   'PYSOURCE'),
+  ('pyi_rth_mplconfig',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_mplconfig.py',
+   'PYSOURCE'),
+  ('pyi_rth__tkinter',
+   'C:\\Polarcam '
+   'Software\\Polarcam_v3\\venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth__tkinter.py',
+   'PYSOURCE'),
+  ('Spinners_gui_live',
+   'C:\\Polarcam Software\\Polarcam_v3\\polarcam_live\\Spinners_gui_live.py',
+   'PYSOURCE')],
+ 'python312.dll',
+ True,
+ False,
+ False,
+ [],
+ None,
+ None,
+ None)

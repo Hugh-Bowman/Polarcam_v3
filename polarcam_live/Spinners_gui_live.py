@@ -892,6 +892,7 @@ class BasicVideoPlayer:
         self._flat_profile_path = None
         self._flat_warned_mismatch = False
         self._flat_field_enabled = bool(self._flat_field_enabled_var.get())
+        self._reset_live_tracking(keep_shift=False)
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -972,6 +973,10 @@ class BasicVideoPlayer:
         self._spotrec_preview_after_id = None
         self._spotrec_preview_interval_ms = 100  # ~10 fps
         self._spotrec_preview_frame_i = 0
+        self._spotrec_preview_path = None
+        self._spotrec_preview_mtime = None
+        self._spotrec_preview_every = 100
+        self._spotrec_preview_last_frame = None
         self._spot_play_btn = None
         self._spotrec_center_offset = (0, 0)
         self._spotrec_xy_label = None
@@ -997,6 +1002,20 @@ class BasicVideoPlayer:
         self._live_disp_scale = 1.0
         self._live_disp_offset = (0, 0)
         self._live_zoom_output_px = 240
+        # Live frame registration/tracking state (center-template translation fit).
+        self._live_track_prev = None  # previous blurred uint8 frame
+        self._live_track_shift = (0.0, 0.0)  # cumulative dx,dy in full-res pixels
+        self._live_track_resp = 0.0
+        self._live_track_interval = 1  # track every N displayed frames
+        self._live_track_counter = 0
+        self._live_track_roi_size = 1200
+        self._live_track_template_size = 800
+        self._live_track_blur_sigma = 1.2
+        self._live_track_bg_sigma = 8.0
+        self._live_track_bright_pct = 92.0
+        self._live_track_score_min = 0.05
+        self._live_track_axis_lock = False
+        self._live_track_min_axis_step = 0.25
 
         # Single capture (decoded once)
         self.cap = None
@@ -1384,20 +1403,158 @@ class BasicVideoPlayer:
         ttk.Frame(plots).grid(row=1, column=2, sticky="nsew")
 
     def _on_tab_changed(self, _event=None) -> None:
-        # Always stop live feed when leaving the live tab.
+        # Keep live feed active for live + spot examine tabs.
         if not hasattr(self, "_notebook"):
             return
         try:
             current = self._notebook.select()
         except Exception:
             return
-        if current != str(getattr(self, "_live_tab", "")):
+        if (current != str(getattr(self, "_live_tab", ""))) and (current != str(getattr(self, "_spotrec_tab", ""))):
             self._stop_live_feed()
         if current != str(getattr(self, "_spotrec_tab", "")):
             self._stop_spotrec()
             self._stop_spotrec_preview_loop()
         else:
+            if (not self._spotrec_running) and (self._spotrec_proc is None) and (not self._live_running):
+                self._start_live_feed()
             self._start_spotrec_preview_loop()
+
+    def _reset_live_tracking(self, keep_shift: bool = False) -> None:
+        self._live_track_prev = None
+        self._live_track_resp = 0.0
+        self._live_track_counter = 0
+        if not keep_shift:
+            self._live_track_shift = (0.0, 0.0)
+
+    def _prepare_tracking_frame(self, frame8: np.ndarray) -> np.ndarray:
+        h, w = int(frame8.shape[0]), int(frame8.shape[1])
+        if h <= 0 or w <= 0:
+            return np.zeros((1, 1), dtype=np.uint8)
+        img = np.asarray(frame8, dtype=np.uint8)
+        # Remove smooth illumination profile so static shading does not dominate matching.
+        try:
+            bg_sigma = float(getattr(self, "_live_track_bg_sigma", 8.0))
+            if bg_sigma > 0.01:
+                bg = cv2.GaussianBlur(img, (0, 0), sigmaX=bg_sigma, sigmaY=bg_sigma, borderType=cv2.BORDER_REPLICATE)
+                img = cv2.subtract(img, bg)
+        except Exception:
+            pass
+        sigma = float(getattr(self, "_live_track_blur_sigma", 0.0))
+        if sigma > 0.01:
+            try:
+                img = cv2.GaussianBlur(img, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REPLICATE)
+            except Exception:
+                pass
+        # Keep only the brightest spikes (e.g., 97th percentile and above).
+        try:
+            bright_pct = float(getattr(self, "_live_track_bright_pct", 97.0))
+            bright_pct = max(80.0, min(99.9, bright_pct))
+            thr = float(np.percentile(img, bright_pct))
+            mask = (img >= thr).astype(np.uint8) * 255
+            # Ensure non-trivial support for matching.
+            nnz = int(np.count_nonzero(mask))
+            min_nnz = max(16, int(0.0002 * float(mask.size)))
+            if nnz < min_nnz:
+                thr2 = float(np.percentile(img, max(80.0, bright_pct - 2.0)))
+                mask = (img >= thr2).astype(np.uint8) * 255
+            return mask
+        except Exception:
+            return img
+
+    def _update_live_tracking(self, frame8: np.ndarray) -> None:
+        if frame8 is None or getattr(frame8, "ndim", 0) != 2:
+            return
+        if not self._spot_centers:
+            self._reset_live_tracking(keep_shift=False)
+            return
+        idx = int(self._spot_idx)
+        if idx < 0 or idx >= len(self._spot_centers):
+            self._reset_live_tracking(keep_shift=False)
+            return
+        interval = max(1, int(self._live_track_interval))
+        self._live_track_counter = (int(self._live_track_counter) + 1) % interval
+        if self._live_track_counter != 0:
+            return
+        try:
+            h, w = int(frame8.shape[0]), int(frame8.shape[1])
+            roi = int(getattr(self, "_live_track_roi_size", 400))
+            tpl = int(getattr(self, "_live_track_template_size", 100))
+            roi = max(64, min(roi, h - 4, w - 4))
+            if roi % 2 != 0:
+                roi -= 1
+            tpl = max(24, min(tpl, roi - 8))
+            if tpl % 2 != 0:
+                tpl += 1
+            tpl = min(tpl, roi - 4)
+            cx = w // 2
+            cy = h // 2
+            half_r = roi // 2
+            rx0 = max(0, min(w - roi, cx - half_r))
+            ry0 = max(0, min(h - roi, cy - half_r))
+            cur_roi_raw = frame8[ry0 : ry0 + roi, rx0 : rx0 + roi]
+            cur = self._prepare_tracking_frame(cur_roi_raw)
+            prev = self._live_track_prev
+            if prev is not None and prev.shape == cur.shape:
+                half_t = tpl // 2
+                tx0 = max(0, min(roi - tpl, (roi // 2) - half_t))
+                ty0 = max(0, min(roi - tpl, (roi // 2) - half_t))
+                prev_tpl = prev[ty0 : ty0 + tpl, tx0 : tx0 + tpl]
+                if prev_tpl.size > 0 and cur.size >= prev_tpl.size:
+                    # Overlap score for sparse bright spikes.
+                    res = cv2.matchTemplate(cur, prev_tpl, cv2.TM_CCORR_NORMED)
+                    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(res)
+                    center_r = 0.5 * float(roi)
+                    match_cx = float(max_loc[0]) + (0.5 * float(tpl))
+                    match_cy = float(max_loc[1]) + (0.5 * float(tpl))
+                    dx = float(match_cx - center_r)
+                    dy = float(match_cy - center_r)
+                    if bool(getattr(self, "_live_track_axis_lock", True)):
+                        # Stage moves only along one axis per frame: keep dominant axis.
+                        if abs(dx) >= abs(dy):
+                            dy = 0.0
+                        else:
+                            dx = 0.0
+                    max_step = max(8.0, (0.5 * float(roi - tpl)) - 2.0)
+                    min_step = max(0.0, float(getattr(self, "_live_track_min_axis_step", 0.25)))
+                    if (
+                        np.isfinite(dx)
+                        and np.isfinite(dy)
+                        and np.isfinite(max_val)
+                        and float(max_val) >= float(getattr(self, "_live_track_score_min", 0.08))
+                        and (abs(dx) >= min_step or abs(dy) >= min_step)
+                        and abs(dx) <= max_step
+                        and abs(dy) <= max_step
+                    ):
+                        sx, sy = self._live_track_shift
+                        self._live_track_shift = (float(sx) + dx, float(sy) + dy)
+                        self._live_track_resp = float(max_val)
+            self._live_track_prev = cur
+        except Exception:
+            return
+
+    def _get_selected_spot_center(self, tracked: bool = True) -> Optional[tuple[float, float]]:
+        if not self._spot_centers:
+            return None
+        idx = max(0, min(int(self._spot_idx), len(self._spot_centers) - 1))
+        cx, cy = self._spot_centers[idx]
+        cx = float(cx)
+        cy = float(cy)
+        if tracked:
+            dx, dy = self._live_track_shift
+            cx += float(dx)
+            cy += float(dy)
+        shape = None
+        if self._live_last_frame is not None and getattr(self._live_last_frame, "ndim", 0) == 2:
+            shape = self._live_last_frame.shape
+        elif self._source_shape is not None:
+            shape = self._source_shape
+        if shape is not None:
+            h, w = int(shape[0]), int(shape[1])
+            if w > 0 and h > 0:
+                cx = max(0.0, min(float(w - 1), cx))
+                cy = max(0.0, min(float(h - 1), cy))
+        return (cx, cy)
 
     def _live_on_frame(self, arr_obj: object) -> None:
         if not self._live_running:
@@ -1448,6 +1605,7 @@ class BasicVideoPlayer:
         if gain is None:
             gain = 0.0
 
+        self._reset_live_tracking(keep_shift=False)
         self._live_app = QApplication.instance() or QApplication([])
         self._live_queue = queue.Queue(maxsize=2)
         self._live_controller = Controller()
@@ -1541,6 +1699,7 @@ class BasicVideoPlayer:
 
         if frame is not None and self._live_img_label is not None:
             try:
+                self._update_live_tracking(frame)
                 img = Image.fromarray(frame)
                 try:
                     resample = Image.Resampling.BILINEAR
@@ -1562,12 +1721,28 @@ class BasicVideoPlayer:
                     self._live_disp_offset = (off_x, off_y)
 
                     mag_on = bool(self._live_mag_enabled_var.get())
-                    canvas_mode = "RGB" if mag_on else "L"
+                    # Keep an RGB canvas so we can always draw spot overlays in color.
+                    canvas_mode = "RGB"
                     canvas = Image.new(canvas_mode, (w, h), 0)
-                    if mag_on:
-                        canvas.paste(img.convert("RGB"), (off_x, off_y))
-                    else:
-                        canvas.paste(img, (off_x, off_y))
+                    canvas.paste(img.convert("RGB"), (off_x, off_y))
+
+                    # Overlay the currently selected spot from analysis/spot-examine tabs.
+                    spot_xy = self._get_selected_spot_center(tracked=True)
+                    if spot_xy is not None:
+                        try:
+                            cx, cy = spot_xy
+                            if 0.0 <= cx < float(src_w) and 0.0 <= cy < float(src_h):
+                                ring_r = 8
+                                px = int(round(off_x + cx * scale))
+                                py = int(round(off_y + cy * scale))
+                                draw = ImageDraw.Draw(canvas)
+                                draw.ellipse(
+                                    [px - ring_r, py - ring_r, px + ring_r, py + ring_r],
+                                    outline=(0, 255, 0),
+                                    width=2,
+                                )
+                        except Exception:
+                            pass
 
                     if mag_on:
                         z = self._parse_float(self._live_zoom_var.get())
@@ -1676,13 +1851,30 @@ class BasicVideoPlayer:
             return
 
         frame = None
-        total = int(self._playback_frame_count())
-        if total > 0:
-            i = int(self._spotrec_preview_frame_i) % total
-            frame = self._get_playback_gray_frame(i)
-            self._spotrec_preview_frame_i = (i + 1) % max(1, total)
-        elif self.last_frame_gray is not None:
-            frame = self.last_frame_gray
+        if self._spotrec_running and self._spotrec_preview_path is not None:
+            try:
+                p = Path(self._spotrec_preview_path)
+                if p.exists():
+                    mtime = p.stat().st_mtime
+                    if self._spotrec_preview_mtime != mtime:
+                        arr = np.load(p, allow_pickle=False)
+                        if arr is not None and getattr(arr, "ndim", 0) >= 2:
+                            frame = _to_gray_u8(arr)
+                            self._spotrec_preview_mtime = mtime
+                            self._spotrec_preview_last_frame = frame
+            except Exception:
+                pass
+            if frame is None and self._spotrec_preview_last_frame is not None:
+                frame = self._spotrec_preview_last_frame
+        if frame is None and (not self._spotrec_running) and self._live_running and self._live_last_frame is not None:
+            frame = self._live_last_frame
+        if frame is None:
+            self._spotrec_preview_label.configure(image="")
+            self._spotrec_preview_after_id = self.root.after(
+                int(self._spotrec_preview_interval_ms),
+                self._spotrec_preview_tick,
+            )
+            return
         self._spotrec_update_preview(gray_frame=frame)
         self._spotrec_preview_after_id = self.root.after(
             int(self._spotrec_preview_interval_ms),
@@ -1695,26 +1887,90 @@ class BasicVideoPlayer:
         if not self._spot_centers:
             self._spotrec_preview_label.configure(image="")
             return
-        idx = max(0, min(self._spot_idx, len(self._spot_centers) - 1))
-        cx, cy = self._spot_centers[idx]
+        center = self._get_selected_spot_center(tracked=False)
+        if center is None:
+            self._spotrec_preview_label.configure(image="")
+            return
+        cx, cy = center
 
-        win = int(self._spotrec_preview_size)
-        src = None
-        if gray_frame is not None and getattr(gray_frame, "ndim", 0) == 2:
-            src = gray_frame
-        elif self.last_frame_gray is not None and getattr(self.last_frame_gray, "ndim", 0) == 2:
-            src = self.last_frame_gray
-        elif self._s_map is not None:
-            src = self._s_map
+        base_win = int(self._spotrec_preview_size)
+        src = gray_frame if (gray_frame is not None and getattr(gray_frame, "ndim", 0) == 2) else None
         if src is None:
             self._spotrec_preview_label.configure(image="")
             return
-        window = self._extract_window(src, cx, cy, win)
-        u8 = detect_spinners.to_u8_preview(window, lo_pct=0.0, hi_pct=100.0)
+        # If preview frames come from a ROI capture, convert full-res center to ROI-local coords.
+        if self._spotrec_running and gray_frame is not None:
+            meta = getattr(self, "_spotrec_roi_meta", None)
+            if isinstance(meta, dict):
+                try:
+                    rx = float(meta.get("x", 0))
+                    ry = float(meta.get("y", 0))
+                    cx = float(cx) - rx
+                    cy = float(cy) - ry
+                    h_src, w_src = src.shape
+                    if cx < 0.0 or cy < 0.0 or cx >= float(w_src) or cy >= float(h_src):
+                        self._spotrec_preview_label.configure(image="")
+                        return
+                except Exception:
+                    pass
+            # During recording: crop (n-1)x(n-1) around the ROI-local spot, then place it on a
+            # fixed 18x18 canvas at the start-record red-box offset (not always centered).
+            try:
+                req_n = int(self._parse_int(self._spotrec_size_var.get()) or 7)
+                req_n = max(1, int(req_n))
+                crop_n = max(1, int(req_n - 1))
+                h_src, w_src = src.shape
+                crop_n = min(crop_n, int(min(h_src, w_src)))
+                if crop_n < 1:
+                    self._spotrec_preview_label.configure(image="")
+                    return
+                crop = self._extract_window(src, cx, cy, crop_n)
+                target_n = 18
+                canvas = np.zeros((target_n, target_n), dtype=crop.dtype)
+                off_x_anchor = int(round(self._spotrec_center_offset[0]))
+                off_y_anchor = int(round(self._spotrec_center_offset[1]))
+                if isinstance(meta, dict):
+                    try:
+                        off_x_anchor = int(round(float(meta.get("off_x_start", off_x_anchor))))
+                        off_y_anchor = int(round(float(meta.get("off_y_start", off_y_anchor))))
+                    except Exception:
+                        pass
+                half_t = target_n // 2
+                anchor_x = half_t + off_x_anchor
+                anchor_y = half_t + off_y_anchor
+                x0 = int(round(anchor_x - (crop_n // 2)))
+                y0 = int(round(anchor_y - (crop_n // 2)))
+                x1 = x0 + crop_n
+                y1 = y0 + crop_n
+
+                dst_x0 = max(0, x0)
+                dst_y0 = max(0, y0)
+                dst_x1 = min(target_n, x1)
+                dst_y1 = min(target_n, y1)
+                if dst_x1 <= dst_x0 or dst_y1 <= dst_y0:
+                    self._spotrec_preview_label.configure(image="")
+                    return
+                src_x0 = max(0, -x0)
+                src_y0 = max(0, -y0)
+                src_x1 = src_x0 + (dst_x1 - dst_x0)
+                src_y1 = src_y0 + (dst_y1 - dst_y0)
+                canvas[dst_y0:dst_y1, dst_x0:dst_x1] = crop[src_y0:src_y1, src_x0:src_x1]
+                window = canvas
+                win = int(window.shape[0])
+            except Exception:
+                window = self._extract_window(src, cx, cy, base_win)
+                win = int(base_win)
+        else:
+            window = self._extract_window(src, cx, cy, base_win)
+            win = int(base_win)
+        # Stronger contrast stretch for very dim live frames.
+        u8 = detect_spinners.to_u8_preview(window, lo_pct=0.0, hi_pct=99.5)
 
         roi = self._parse_int(self._spotrec_size_var.get()) or 7
         roi = max(1, int(roi))
-        if roi % 2 == 0:
+        if self._spotrec_running and gray_frame is not None:
+            roi = max(1, int(roi - 1))
+        elif roi % 2 == 0:
             roi += 1
         if roi > win:
             roi = win
@@ -1722,23 +1978,34 @@ class BasicVideoPlayer:
         half_win = win // 2
 
         off_x, off_y = self._spotrec_center_offset
-        off_x = max(-half_win + half_roi, min(half_win - half_roi, int(round(off_x))))
-        off_y = max(-half_win + half_roi, min(half_win - half_roi, int(round(off_y))))
-        self._spotrec_center_offset = (off_x, off_y)
+        if self._spotrec_running and gray_frame is not None and isinstance(meta, dict):
+            try:
+                off_x = int(round(float(meta.get("off_x_start", off_x))))
+                off_y = int(round(float(meta.get("off_y_start", off_y))))
+            except Exception:
+                pass
+            off_x = max(-half_win + half_roi, min(half_win - half_roi, int(round(off_x))))
+            off_y = max(-half_win + half_roi, min(half_win - half_roi, int(round(off_y))))
+        else:
+            off_x = max(-half_win + half_roi, min(half_win - half_roi, int(round(off_x))))
+            off_y = max(-half_win + half_roi, min(half_win - half_roi, int(round(off_y))))
+            self._spotrec_center_offset = (off_x, off_y)
 
         x0 = half_win + off_x - half_roi
         y0 = half_win + off_y - half_roi
         x1 = x0 + roi - 1
         y1 = y0 + roi - 1
 
-        scale = int(self._spotrec_preview_scale)
+        disp_size = int(self._spotrec_preview_size) * int(self._spotrec_preview_scale)
+        disp_size = max(10, disp_size)
+        scale = float(disp_size) / float(win) if win > 0 else 1.0
         img = Image.fromarray(u8).convert("RGB")
-        img = img.resize((win * scale, win * scale), resample=Image.NEAREST)
+        img = img.resize((disp_size, disp_size), resample=Image.NEAREST)
         # Draw ROI box on the scaled preview so the border doesn't expand with zoom.
-        sx0 = x0 * scale
-        sy0 = y0 * scale
-        sx1 = (x1 + 1) * scale - 1
-        sy1 = (y1 + 1) * scale - 1
+        sx0 = int(round(x0 * scale))
+        sy0 = int(round(y0 * scale))
+        sx1 = int(round((x1 + 1) * scale - 1))
+        sy1 = int(round((y1 + 1) * scale - 1))
         draw = ImageDraw.Draw(img)
         draw.rectangle([sx0, sy0, sx1, sy1], outline=(255, 0, 0), width=1)
         # Debug overlay: actual ROI + phase.
@@ -1885,7 +2152,8 @@ class BasicVideoPlayer:
     def _start_spotrec(self) -> None:
         if self._spotrec_running:
             return
-        if not self._spot_centers:
+        center = self._get_selected_spot_center(tracked=False)
+        if center is None:
             messagebox.showerror("Spot examine", "No spot selected.")
             return
         fps = self._parse_float(self._spotrec_fps_var.get())
@@ -1897,23 +2165,18 @@ class BasicVideoPlayer:
             messagebox.showerror("Spot examine", "Exposure time must be > 0 ms.")
             return
 
+        cx, cy = center
         # Ensure live feed is stopped so the camera is free.
         self._stop_live_feed()
-
-        idx = max(0, min(self._spot_idx, len(self._spot_centers) - 1))
-        cx, cy = self._spot_centers[idx]
+        preview_every = int(max(1, int(self._spotrec_preview_every)))
         off_x, off_y = self._spotrec_center_offset
         w_user = self._parse_int(self._spotrec_size_var.get()) or 7
         w_user = max(1, int(w_user))
         if w_user % 2 == 0:
             w_user += 1
-        # Ensure camera ROI is large enough to support the same intensity-plane window
-        # used in tab-2 (which is based on the requested full-res window size).
-        win_int = int(round(w_user / 2.0))
-        if win_int % 2 == 0:
-            win_int += 1
-        w_cam = max(w_user, (2 * win_int + 1))
-        h_cam = w_cam
+        # Camera ROI should match the user-selected size.
+        w_cam = int(w_user)
+        h_cam = int(w_user)
         cx2 = float(cx) + float(off_x)
         cy2 = float(cy) + float(off_y)
         x = int(round(cx2)) - (w_cam // 2)
@@ -1929,6 +2192,7 @@ class BasicVideoPlayer:
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
         out_path = out_dir / f"spotrec_{ts}.npy"
+        preview_path = out_dir / f"spotrec_preview_{ts}.npy"
         stop_flag = out_dir / f"spotrec_{ts}.stop"
         try:
             stop_flag.unlink(missing_ok=True)
@@ -1954,6 +2218,10 @@ class BasicVideoPlayer:
             str(float(exp_ms)),
             "--stop-flag",
             str(stop_flag),
+            "--preview-path",
+            str(preview_path),
+            "--preview-every",
+            str(int(preview_every)),
             "--json",
             "--n-frames",
             "1000000",
@@ -1973,6 +2241,10 @@ class BasicVideoPlayer:
         self._spotrec_proc = proc
         self._spotrec_stop_flag = stop_flag
         self._spotrec_out_path = out_path
+        self._spotrec_preview_path = preview_path
+        self._spotrec_preview_mtime = None
+        self._spotrec_preview_every = int(preview_every)
+        self._spotrec_preview_last_frame = None
         self._spotrec_roi_meta = {
             "x": int(x),
             "y": int(y),
@@ -1980,6 +2252,8 @@ class BasicVideoPlayer:
             "h": int(h_cam),
             "cx": float(cx2),
             "cy": float(cy2),
+            "off_x_start": int(off_x),
+            "off_y_start": int(off_y),
             "win_raw": int(w_user),
             "phase_x": int(x) % 2,
             "phase_y": int(y) % 2,
@@ -2024,6 +2298,17 @@ class BasicVideoPlayer:
         proc = self._spotrec_proc
         self._spotrec_proc = None
 
+        def _clear_preview():
+            p = self._spotrec_preview_path
+            self._spotrec_preview_path = None
+            self._spotrec_preview_mtime = None
+            self._spotrec_preview_last_frame = None
+            if p:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
         def _wait_and_process():
             if proc is None:
                 return
@@ -2031,6 +2316,7 @@ class BasicVideoPlayer:
                 out, err = proc.communicate()
             except Exception as e:
                 self._ui_call(messagebox.showerror, "Spot examine", str(e))
+                _clear_preview()
                 return
             if proc.returncode != 0:
                 msg = (err or out or "Recording failed.").strip()
@@ -2040,6 +2326,7 @@ class BasicVideoPlayer:
                 self._ui_call(self._update_spotrec_label)
                 if self._spotrec_start_btn is not None:
                     self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                _clear_preview()
                 return
 
             payload = (out or "").strip().splitlines()
@@ -2047,6 +2334,7 @@ class BasicVideoPlayer:
                 self._ui_call(messagebox.showerror, "Spot examine", "No output from recorder.")
                 if self._spotrec_start_btn is not None:
                     self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                _clear_preview()
                 return
             try:
                 data = json.loads(payload[-1])
@@ -2058,11 +2346,13 @@ class BasicVideoPlayer:
                 self._ui_call(messagebox.showerror, "Spot examine", f"Bad output: {e}")
                 if self._spotrec_start_btn is not None:
                     self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                _clear_preview()
                 return
             if not path.exists():
                 self._ui_call(messagebox.showerror, "Spot examine", "Recording file missing.")
                 if self._spotrec_start_btn is not None:
                     self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                _clear_preview()
                 return
 
             try:
@@ -2071,6 +2361,7 @@ class BasicVideoPlayer:
                 self._ui_call(messagebox.showerror, "Spot examine", f"Could not load: {e}")
                 if self._spotrec_start_btn is not None:
                     self._ui_call(self._spotrec_start_btn.state, ["!disabled"])
+                _clear_preview()
                 return
 
             xy_series = []
@@ -2114,6 +2405,7 @@ class BasicVideoPlayer:
                 self._spotrec_xy_series = xy_series
                 self._spotrec_phi_series = phi_series
                 self._spotrec_tmp_path = path
+                _clear_preview()
                 if self._spotrec_save_btn is not None:
                     self._spotrec_save_btn.state(["!disabled"])
                 if self._spotrec_discard_btn is not None:
@@ -2122,6 +2414,8 @@ class BasicVideoPlayer:
                 self._update_spotrec_label()
                 if self._spotrec_start_btn is not None:
                     self._spotrec_start_btn.state(["!disabled"])
+                # Resume the live camera stream after spot recording completes.
+                self._start_live_feed()
             self._ui_call(_apply_results)
 
         t = threading.Thread(target=_wait_and_process, daemon=True)
@@ -4255,6 +4549,7 @@ class BasicVideoPlayer:
         self._phi_frames_processed = 0
         self._spot_idx = 0
         self._spotrec_preview_frame_i = 0
+        self._reset_live_tracking(keep_shift=False)
         self._update_spot_view()
 
         # Start recon thread (consumes queue, processes EVERY frame)
@@ -4596,8 +4891,10 @@ class BasicVideoPlayer:
         self.source_fps = 30.0
         self.current_idx = 0
         self.last_frame_gray = None
+        self._live_last_frame = None
         self.proc_done = 0
         self.decode_done = False
+        self._reset_live_tracking(keep_shift=False)
 
         self.status_var.set("No video loaded")
         self.bottom_var.set("")
