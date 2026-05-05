@@ -1,0 +1,102 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\begin{document}
+\section*{Propagation Model with Intrinsic Angle Jitter}
+Let
+\[
+r=\sqrt{x^2+y^2},\qquad
+\phi=\tfrac12\operatorname{atan2}(y,x),\qquad
+\theta=\theta(r).
+\]
+Assume isotropic Cartesian measurement noise per frame and an intensity-dependent level:
+\[
+\sigma_{xy}^2(I,N_{\text{pix}})
+=
+\frac{\sigma_{\text{light}}^2}{I}
++
+\sigma_{\text{source}}^2
++
+\frac{\sigma_{\text{bg}}^2\,N_{\text{pix}}}{I^2}.
+\]
+Here \(N_{\text{pix}}\) is the ROI pixel count (\(11\times 11=121\) or \(15\times 15=225\)).
+The background term corresponds to additive per-pixel Poisson fluctuations:
+if each pixel has background mean/variance \(b\), summed background fluctuation scales as
+\(\sqrt{N_{\text{pix}}\,b}\), and centroid-noise variance contributes approximately as
+\(N_{\text{pix}}/I^2\) after normalization by spot signal \(I\).
+Also include intrinsic small frame-to-frame angular jitter terms (e.g.\ Brownian/vibration):
+\[
+\delta\phi_{\text{jit}}\sim(0,\sigma_{\phi,\text{jit}}^2),\qquad
+\delta\theta_{\text{jit}}\sim(0,\sigma_{\theta,\text{jit}}^2).
+\]
+
+\paragraph{Propagation to \(\phi\).}
+Using first-order propagation for \(\phi=\tfrac12\operatorname{atan2}(y,x)\):
+\[
+\frac{\partial\phi}{\partial x}=-\frac{y}{2r^2},\qquad
+\frac{\partial\phi}{\partial y}=\frac{x}{2r^2}.
+\]
+With \(\mathrm{Var}(x)=\mathrm{Var}(y)=\sigma_{xy}^2(I)\) and zero covariance:
+\[
+\mathrm{Var}(\phi)_{\text{meas}}
+\approx
+\left(\frac{\partial\phi}{\partial x}\right)^2\sigma_{xy}^2
++
+\left(\frac{\partial\phi}{\partial y}\right)^2\sigma_{xy}^2
+=
+\frac{\sigma_{xy}^2(I)}{4r^2}.
+\]
+Adding intrinsic jitter in quadrature:
+\[
+\sigma_\phi^2(r,I)=\frac{\sigma_{xy}^2(I)}{4r^2}+\sigma_{\phi,\text{jit}}^2.
+\]
+
+\paragraph{Propagation to \(\theta\).}
+Since \(\theta=\theta(r)\),
+\[
+\delta\theta_{\text{meas}}\approx \frac{d\theta}{dr}\,\delta r,
+\]
+and for isotropic \((x,y)\) noise, \(\mathrm{Var}(r)\approx \sigma_{xy}^2(I)\). Hence
+\[
+\mathrm{Var}(\theta)_{\text{meas}}
+\approx
+\left(\frac{d\theta}{dr}\right)^2 \sigma_{xy}^2(I).
+\]
+Adding intrinsic jitter in quadrature:
+\[
+\sigma_\theta^2(r,I)=
+\left(\frac{d\theta}{dr}\right)^2 \sigma_{xy}^2(I)
++
+\sigma_{\theta,\text{jit}}^2.
+\]
+
+\paragraph{As functions of \(\theta\).}
+Using \(r=r(\theta)\) (inverse calibration) and \(I(\theta)\approx I_0\sin^2\theta\):
+\[
+\sigma_\phi^2(\theta)=
+\frac{1}{4\,r(\theta)^2}
+\left(
+\frac{\sigma_{\text{light}}^2}{I_0\sin^2\theta}
++
+\sigma_{\text{source}}^2
++
+\frac{\sigma_{\text{bg}}^2\,N_{\text{pix}}}{\left(I_0\sin^2\theta\right)^2}
+\right)
++
+\sigma_{\phi,\text{jit}}^2,
+\]
+\[
+\sigma_\theta^2(\theta)=
+\left(\frac{d\theta}{dr}\Big|_{r(\theta)}\right)^2
+\left(
+\frac{\sigma_{\text{light}}^2}{I_0\sin^2\theta}
++
+\sigma_{\text{source}}^2
++
+\frac{\sigma_{\text{bg}}^2\,N_{\text{pix}}}{\left(I_0\sin^2\theta\right)^2}
+\right)
++
+\sigma_{\theta,\text{jit}}^2.
+\]
+These are the fitted theoretical error curves.
+\end{document}

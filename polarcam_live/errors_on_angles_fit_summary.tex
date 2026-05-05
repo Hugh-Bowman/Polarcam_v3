@@ -1,0 +1,153 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\begin{document}
+
+\section*{Error Propagation From Pixel Noise to $\sigma_\phi(\theta)$ and $\sigma_\theta(\theta)$}
+
+Start from the per-channel pixel-level noise model:
+\[
+\mathrm{Var}(I)=aI+b^2 I+\sigma_{bg}^2.
+\]
+
+For each local polarization cell $j$, define
+\[
+X_j=\frac{I_{0,j}-I_{90,j}}{I_{0,j}+I_{90,j}},
+\qquad
+Y_j=\frac{I_{45,j}-I_{135,j}}{I_{45,j}+I_{135,j}}.
+\]
+The frame-level values are averages over $N$ cells:
+\[
+X_{\text{frame}}=\frac{1}{N}\sum_{j=1}^N X_j,
+\qquad
+Y_{\text{frame}}=\frac{1}{N}\sum_{j=1}^N Y_j.
+\]
+
+Using first-order propagation and independent cells/channels, and the symmetric approximation
+\[
+I_{0,j}=I_{90,j}=I_{45,j}=I_{135,j}=\frac{I(\theta)}{2},
+\]
+we obtain
+\[
+\mathrm{Var}(X_{\text{frame}})=\mathrm{Var}(Y_{\text{frame}})
+=\sigma_{xy}^2(\theta)
+=\frac{1}{N}\left[
+\frac{a}{I(\theta)}+\frac{b^2}{2}+\frac{2\sigma_{bg}^2}{I(\theta)^2}
+\right].
+\]
+
+Use the intensity-angle model
+\[
+I(\theta)=\sigma_{bg}^2+K\sin^2\theta.
+\]
+Hence
+\[
+\sigma_{xy}^2(\theta)=\frac{1}{N}\left[
+\frac{a}{\sigma_{bg}^2+K\sin^2\theta}
++\frac{b^2}{2}
++\frac{2\sigma_{bg}^2}{\left(\sigma_{bg}^2+K\sin^2\theta\right)^2}
+\right].
+\]
+
+\subsection*{Phi error}
+Rod azimuth is calculated from
+\[
+\phi=\tfrac12\operatorname{atan2}(Y,X),
+\]
+and $r=\sqrt{X^2+Y^2}$, propagation gives
+\[
+\sigma_\phi^2\approx\frac{\sigma_{xy}^2}{4r^2}.
+\]
+Where the $\theta\leftrightarrow r$ mapping is
+\[
+r(\theta)=\frac{B\sin^2\theta}{A+C\sin^2\theta},
+\]
+and can be substituted to get an expression in $\theta$ only:
+\[
+\boxed{
+\sigma_\phi(\theta)=
+\sqrt{
+\frac{\sigma_{xy}^2(\theta)}{4\,r(\theta)^2}
+}
+}
+\]
+
+\subsection*{Theta error}
+Using
+\[
+\theta(r)=\arcsin\sqrt{\frac{Ar}{B-Cr}},
+\]
+with constants
+\[
+A=0.1865937176,\quad B=0.5576753053,\quad C=0.4215514426.
+\]
+Propagation gives
+\[
+\sigma_\theta^2\approx\left(\frac{d\theta}{dr}\right)^2\sigma_{xy}^2.
+\]
+Write the derivative directly in terms of $\theta$ by substituting $r=r(\theta)$ and using
+\[
+\sin^2\theta=\frac{Ar}{B-Cr}.
+\]
+Then
+\[
+\left.\frac{d\theta}{dr}\right|_{r=r(\theta)}
+=
+\frac{A+C\sin^2\theta}{2B\sin\theta\cos\theta}.
+\]
+Therefore
+\[
+\boxed{
+\sigma_\theta(\theta)=
+\frac{A+C\sin^2\theta}{2B\sin\theta\cos\theta}
+\sqrt{\sigma_{xy}^2(\theta)}
+}
+\]
+
+\subsection*{Final explicit forms}
+\[
+\sigma_{xy}^2(\theta)=\frac{1}{N}\left[
+\frac{a}{\sigma_{bg}^2+K\sin^2\theta}
++\frac{b^2}{2}
++\frac{2\sigma_{bg}^2}{\left(\sigma_{bg}^2+K\sin^2\theta\right)^2}
+\right],
+\]
+\[
+r(\theta)=\frac{B\sin^2\theta}{A+C\sin^2\theta},
+\]
+\[
+\sigma_\phi(\theta)=
+\sqrt{\frac{1}{4r(\theta)^2}
+\cdot\frac{1}{N}\left[
+\frac{a}{\sigma_{bg}^2+K\sin^2\theta}
++\frac{b^2}{2}
++\frac{2\sigma_{bg}^2}{\left(\sigma_{bg}^2+K\sin^2\theta\right)^2}
+\right]},
+\]
+\[
+\sigma_\theta(\theta)=
+\frac{A+C\sin^2\theta}{2B\sin\theta\cos\theta}
+\sqrt{\frac{1}{N}\left[
+\frac{a}{\sigma_{bg}^2+K\sin^2\theta}
++\frac{b^2}{2}
++\frac{2\sigma_{bg}^2}{\left(\sigma_{bg}^2+K\sin^2\theta\right)^2}
+\right]}.
+\]
+
+For rods with different overall brightness, this is primarily captured by the fitted value of $K$ in
+$I(\theta)=\sigma_{bg}^2+K\sin^2\theta$ (dimmer rods correspond to smaller $K$).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\textwidth]{phi_err.png}
+\caption{$\phi$ error vs $\theta$.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\textwidth]{theta_err.png}
+\caption{$\theta$ error vs $\theta$.}
+\end{figure}
+
+\end{document}

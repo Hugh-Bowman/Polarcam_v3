@@ -2,6 +2,7 @@
 import time
 import json
 import os
+import shutil
 import traceback
 from pathlib import Path
 import threading
@@ -299,6 +300,34 @@ class BasicVideoPlayer:
     DIR_PSD_THRESHOLD_FRAC = 0.02  # retained (no longer used for integration bounds)
     DIR_FILTER_B_MIN = 0.4
     FLAT_FIELD_FILENAME = "background_profile_gaussian_sigma20.npy"
+    STATIONARY_R_MIN_DEFAULT = 0.35
+    STATIONARY_BRIGHT_MIN_DEFAULT = 20.0
+    STATIONARY_MOTION_MAX_DEFAULT = 0.12
+    STATIONARY_MIN_FRAMES = 8
+    STATIONARY_SEED_BRIGHT_PCT = 92.0
+    STATIONARY_SEED_MIN_AREA = 2
+    STATIONARY_MAX_CANDIDATES = 300
+    STATIONARY_REC_77_FPS_DEFAULT = 77.0
+    STATIONARY_REC_77_EXP_MS_DEFAULT = 0.02
+    STATIONARY_REC_77_DURATION_S_DEFAULT = 5.0
+    STATIONARY_REC_77_ROI_RAW_DEFAULT = 15
+    STATIONARY_REC_MAX_EXP_MS_DEFAULT = 0.02
+    STATIONARY_REC_MAX_DURATION_S_DEFAULT = 2.0
+    STATIONARY_REC_MAX_FPS_EST_DEFAULT = 2000.0
+    STATIONARY_REC_MAX_ROI_RAW = 11
+    STATIONARY_REC_ALL_77_FPS = 77.0
+    STATIONARY_REC_ALL_77_EXP_MS = 0.02
+    STATIONARY_REC_ALL_77_DURATION_S = 5.0
+    STATIONARY_REC_ALL_77_ROI_RAW = 15
+    STATIONARY_REC_ALL_MAX_EXP_MS = 0.02
+    STATIONARY_REC_ALL_MAX_DURATION_S = 2.0
+    STATIONARY_REC_ALL_MAX_ROI_RAW = 11
+    STATIONARY_DATASET_DIRNAME = "stationary_rod_dataset"
+    STATIONARY_DATASET_PENDING_DIR = "pending"
+    STATIONARY_DATASET_GOOD_DIR = "good"
+    RECORDINGS_ROOT_DIRNAME = "recordings"
+    RECORDINGS_WIDEFIELD_DIRNAME = "widefield_frames"
+    RECORDINGS_SPOT_DIRNAME = "spots"
 
     def _find_centers_on_s_map(self, s_map_full: np.ndarray) -> list[tuple[float, float]]:
         """
@@ -767,7 +796,7 @@ class BasicVideoPlayer:
 
     def _fetch_frames_worker(self, fps: float, exp_ms: float, n_frames: int) -> None:
         try:
-            out_dir = Path.cwd() / "frame_runs"
+            out_dir = self._recordings_subdir(self.RECORDINGS_WIDEFIELD_DIRNAME)
             ts = time.strftime("%Y%m%d-%H%M%S")
             out_path = out_dir / f"frame_stack_{ts}.npy"
             self._ui_call(self.bottom_var.set, f"Fetching {n_frames} frame(s)...")
@@ -872,6 +901,9 @@ class BasicVideoPlayer:
         self._spot_window_cache = []
         self._spot_window_cache_size = None
         self._spot_view_cache = []
+        self._stationary_candidates = []
+        self._stationary_idx = 0
+        self._set_selected_center_override(None, source="analysis")
 
         # Clear decoded frame cache (AVI only; NPY isn't cached anyway).
         with self._gray_lock:
@@ -893,6 +925,7 @@ class BasicVideoPlayer:
         self._flat_warned_mismatch = False
         self._flat_field_enabled = bool(self._flat_field_enabled_var.get())
         self._reset_live_tracking(keep_shift=False)
+        self._update_stationary_view()
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -985,6 +1018,7 @@ class BasicVideoPlayer:
         self._spotrec_dir_label = None
         self._spotrec_hand_label = None
         self._spotrec_dir_var = tk.StringVar(value="B: -")
+        self._spotrec_brownian_var = tk.StringVar(value="Brownian: -")
         self._spotrec_xy_ref = None
         self._spotrec_phi_ref = None
         self._spotrec_fft_ref = None
@@ -1039,6 +1073,8 @@ class BasicVideoPlayer:
         self._spot_centers_all = []
         self._spot_centers = []
         self._spot_idx = 0
+        self._selected_center_override = None  # Optional[(cx, cy)] from non-analysis selectors.
+        self._selected_center_source = "analysis"
         self._spot_phi_series_all = []
         self._spot_phi_series = []
         self._phi_frames_processed = 0
@@ -1070,6 +1106,68 @@ class BasicVideoPlayer:
         self._smap_spot_text_ids = []
         self._smap_overlay_after_id = None
         self._smap_overlay_pending = []
+        self._stationary_candidates = []
+        self._stationary_idx = 0
+        self._stationary_status_var = tk.StringVar(value="Stationary 0 / 0")
+        self._stationary_metrics_var = tk.StringVar(value="")
+        self._stationary_brightness_min_var = tk.StringVar(
+            value=f"{self.STATIONARY_BRIGHT_MIN_DEFAULT:.1f}"
+        )
+        self._stationary_r_min_var = tk.StringVar(value=f"{self.STATIONARY_R_MIN_DEFAULT:.2f}")
+        self._stationary_motion_max_var = tk.StringVar(
+            value=f"{self.STATIONARY_MOTION_MAX_DEFAULT:.2f}"
+        )
+        self._stationary_prev_btn = None
+        self._stationary_next_btn = None
+        self._stationary_capture_77_fps_var = tk.StringVar(
+            value=f"{self.STATIONARY_REC_77_FPS_DEFAULT:.2f}"
+        )
+        self._stationary_capture_77_exp_ms_var = tk.StringVar(
+            value=f"{self.STATIONARY_REC_77_EXP_MS_DEFAULT:.3f}"
+        )
+        self._stationary_capture_77_duration_s_var = tk.StringVar(
+            value=f"{self.STATIONARY_REC_77_DURATION_S_DEFAULT:.2f}"
+        )
+        self._stationary_capture_77_roi_var = tk.StringVar(
+            value=str(int(self.STATIONARY_REC_77_ROI_RAW_DEFAULT))
+        )
+        self._stationary_capture_max_exp_ms_var = tk.StringVar(
+            value=f"{self.STATIONARY_REC_MAX_EXP_MS_DEFAULT:.3f}"
+        )
+        self._stationary_capture_max_duration_s_var = tk.StringVar(
+            value=f"{self.STATIONARY_REC_MAX_DURATION_S_DEFAULT:.2f}"
+        )
+        self._stationary_capture_max_fps_est_var = tk.StringVar(
+            value=f"{self.STATIONARY_REC_MAX_FPS_EST_DEFAULT:.1f}"
+        )
+        self._stationary_capture_status_var = tk.StringVar(value="Stationary capture idle.")
+        self._stationary_capture_running = False
+        self._stationary_capture_lock = threading.Lock()
+        self._stationary_capture_selected_btn = None
+        self._stationary_capture_all_btn = None
+        self._stationary_spot_img_label = None
+        self._stationary_xy_label = None
+        self._stationary_phi_label = None
+        self._stationary_spot_ref = None
+        self._stationary_xy_ref = None
+        self._stationary_phi_ref = None
+        self._stationary_review_status_var = tk.StringVar(value="Pending 0 | Good 0")
+        self._stationary_review_detail_var = tk.StringVar(value="No stationary recordings yet.")
+        self._stationary_review_theta_var = tk.StringVar(value="")
+        self._stationary_review_include_var = tk.BooleanVar(value=False)
+        self._stationary_review_include_sync = False
+        self._stationary_review_idx = 0
+        self._stationary_review_items: list[tuple[str, Path]] = []
+        self._stationary_review_prev_btn = None
+        self._stationary_review_next_btn = None
+        self._stationary_review_mark_chk = None
+        self._stationary_review_xy77_label = None
+        self._stationary_review_xymax_label = None
+        self._stationary_review_hist_label = None
+        self._stationary_review_xy77_ref = None
+        self._stationary_review_xymax_ref = None
+        self._stationary_review_hist_ref = None
+        self._stationary_dataset_tab = None
         self._play_popup = None
         self._play_running = False
         self._play_after_id = None
@@ -1115,6 +1213,9 @@ class BasicVideoPlayer:
         self._update_spotrec_label()
         self._start_ui_pump()
         self._spotrec_size_var.trace_add("write", lambda *_: self._spotrec_update_preview())
+        self._stationary_review_include_var.trace_add(
+            "write", lambda *_: self._on_stationary_review_include_toggle()
+        )
 
     def _build_ui(self) -> None:
         notebook = ttk.Notebook(self.root)
@@ -1123,14 +1224,20 @@ class BasicVideoPlayer:
 
         self._live_tab = ttk.Frame(notebook)
         self._analysis_tab = ttk.Frame(notebook)
+        self._stationary_tab = ttk.Frame(notebook)
+        self._stationary_dataset_tab = ttk.Frame(notebook)
         self._spotrec_tab = ttk.Frame(notebook)
         notebook.add(self._live_tab, text="Live video")
         notebook.add(self._analysis_tab, text="Spot analysis")
+        notebook.add(self._stationary_tab, text="Stationary rods")
+        notebook.add(self._stationary_dataset_tab, text="Stationary dataset")
         notebook.add(self._spotrec_tab, text="Spot examine")
         notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self._build_live_ui(self._live_tab)
         self._build_analysis_ui(self._analysis_tab)
+        self._build_stationary_ui(self._stationary_tab)
+        self._build_stationary_dataset_ui(self._stationary_dataset_tab)
         self._build_spotrec_ui(self._spotrec_tab)
 
     def _build_live_ui(self, parent: tk.Widget) -> None:
@@ -1342,6 +1449,161 @@ class BasicVideoPlayer:
         self.bottom_var = tk.StringVar(value="")
         ttk.Label(main, textvariable=self.bottom_var).pack(side=tk.BOTTOM, anchor="w")
 
+    def _build_stationary_ui(self, parent: tk.Widget) -> None:
+        top = ttk.Frame(parent, padding=8)
+        top.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(top, text="Min brightness").pack(side=tk.LEFT)
+        ttk.Entry(top, textvariable=self._stationary_brightness_min_var, width=8).pack(
+            side=tk.LEFT, padx=(6, 12)
+        )
+        ttk.Label(top, text="Min mean r").pack(side=tk.LEFT)
+        ttk.Entry(top, textvariable=self._stationary_r_min_var, width=8).pack(
+            side=tk.LEFT, padx=(6, 12)
+        )
+        ttk.Label(top, text="Max range XY").pack(side=tk.LEFT)
+        ttk.Entry(top, textvariable=self._stationary_motion_max_var, width=8).pack(
+            side=tk.LEFT, padx=(6, 12)
+        )
+        ttk.Button(top, text="Find stationary rods", command=self._refresh_stationary_candidates).pack(
+            side=tk.LEFT
+        )
+        ttk.Label(top, textvariable=self._stationary_status_var).pack(side=tk.RIGHT)
+
+        nav = ttk.Frame(parent, padding=(8, 0, 8, 0))
+        nav.pack(side=tk.TOP, fill=tk.X)
+        self._stationary_prev_btn = ttk.Button(
+            nav, text="<", width=3, command=self._prev_stationary_spot
+        )
+        self._stationary_prev_btn.pack(side=tk.LEFT)
+        self._stationary_next_btn = ttk.Button(
+            nav, text=">", width=3, command=self._next_stationary_spot
+        )
+        self._stationary_next_btn.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(nav, textvariable=self._stationary_metrics_var).pack(side=tk.LEFT, padx=(10, 0))
+
+        capture = ttk.Frame(parent, padding=(8, 6, 8, 0))
+        capture.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(capture, text="77fps mode: FPS").pack(side=tk.LEFT)
+        ttk.Entry(capture, textvariable=self._stationary_capture_77_fps_var, width=6).pack(
+            side=tk.LEFT, padx=(4, 8)
+        )
+        ttk.Label(capture, text="Exp (ms)").pack(side=tk.LEFT)
+        ttk.Entry(capture, textvariable=self._stationary_capture_77_exp_ms_var, width=6).pack(
+            side=tk.LEFT, padx=(4, 8)
+        )
+        ttk.Label(capture, text="Duration (s)").pack(side=tk.LEFT)
+        ttk.Entry(capture, textvariable=self._stationary_capture_77_duration_s_var, width=6).pack(
+            side=tk.LEFT, padx=(4, 8)
+        )
+        ttk.Label(capture, text="FOV px").pack(side=tk.LEFT)
+        ttk.Entry(capture, textvariable=self._stationary_capture_77_roi_var, width=6).pack(
+            side=tk.LEFT, padx=(4, 16)
+        )
+        ttk.Label(capture, text="Max-FPS mode: 11x11, Exp (ms)").pack(side=tk.LEFT)
+        ttk.Entry(capture, textvariable=self._stationary_capture_max_exp_ms_var, width=6).pack(
+            side=tk.LEFT, padx=(4, 8)
+        )
+        ttk.Label(capture, text="Duration (s)").pack(side=tk.LEFT)
+        ttk.Entry(capture, textvariable=self._stationary_capture_max_duration_s_var, width=6).pack(
+            side=tk.LEFT, padx=(4, 8)
+        )
+        ttk.Label(capture, text="FPS estimate").pack(side=tk.LEFT)
+        ttk.Entry(capture, textvariable=self._stationary_capture_max_fps_est_var, width=7).pack(
+            side=tk.LEFT, padx=(4, 12)
+        )
+        self._stationary_capture_selected_btn = ttk.Button(
+            capture, text="Record selected (both modes)", command=self._stationary_capture_selected
+        )
+        self._stationary_capture_selected_btn.pack(side=tk.LEFT)
+        self._stationary_capture_all_btn = ttk.Button(
+            capture, text="Record all stationary", command=self._stationary_capture_all
+        )
+        self._stationary_capture_all_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        capture_status = ttk.Frame(parent, padding=(8, 2, 8, 2))
+        capture_status.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(capture_status, textvariable=self._stationary_capture_status_var).pack(
+            side=tk.LEFT, anchor="w"
+        )
+
+        plots = ttk.Frame(parent, padding=8)
+        plots.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        plots.columnconfigure(0, weight=1)
+        plots.columnconfigure(1, weight=1)
+        plots.rowconfigure(0, weight=1)
+        plots.rowconfigure(1, weight=1)
+
+        ttk.Label(plots, text="S-map window").grid(row=0, column=0, sticky="w")
+        ttk.Label(plots, text="X/Y scatter").grid(row=0, column=1, sticky="w")
+        self._stationary_spot_img_label = ttk.Label(plots)
+        self._stationary_spot_img_label.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        self._stationary_xy_label = ttk.Label(plots)
+        self._stationary_xy_label.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
+
+        phi_row = ttk.Frame(parent, padding=(8, 0, 8, 8))
+        phi_row.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        ttk.Label(phi_row, text="Phi(t)").pack(side=tk.TOP, anchor="w")
+        self._stationary_phi_label = ttk.Label(phi_row)
+        self._stationary_phi_label.pack(side=tk.TOP, anchor="w")
+
+        self._update_stationary_view()
+
+    def _build_stationary_dataset_ui(self, parent: tk.Widget) -> None:
+        top = ttk.Frame(parent, padding=8)
+        top.pack(side=tk.TOP, fill=tk.X)
+        ttk.Button(top, text="Refresh dataset", command=self._stationary_review_refresh).pack(
+            side=tk.LEFT
+        )
+        ttk.Label(top, textvariable=self._stationary_review_status_var).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(top, textvariable=self._stationary_review_theta_var).pack(side=tk.RIGHT)
+
+        nav = ttk.Frame(parent, padding=(8, 0, 8, 0))
+        nav.pack(side=tk.TOP, fill=tk.X)
+        self._stationary_review_prev_btn = ttk.Button(
+            nav, text="<", width=3, command=self._stationary_review_prev
+        )
+        self._stationary_review_prev_btn.pack(side=tk.LEFT)
+        self._stationary_review_next_btn = ttk.Button(
+            nav, text=">", width=3, command=self._stationary_review_next
+        )
+        self._stationary_review_next_btn.pack(side=tk.LEFT, padx=(4, 8))
+        self._stationary_review_mark_chk = ttk.Checkbutton(
+            nav,
+            text="Good enough (tick to move into good folder)",
+            variable=self._stationary_review_include_var,
+        )
+        self._stationary_review_mark_chk.pack(side=tk.LEFT)
+
+        ttk.Label(
+            parent,
+            textvariable=self._stationary_review_detail_var,
+            padding=(8, 6, 8, 2),
+            justify=tk.LEFT,
+        ).pack(side=tk.TOP, anchor="w", fill=tk.X)
+
+        plots = ttk.Frame(parent, padding=8)
+        plots.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        plots.columnconfigure(0, weight=1)
+        plots.columnconfigure(1, weight=1)
+        plots.rowconfigure(0, weight=1)
+        plots.rowconfigure(1, weight=1)
+
+        ttk.Label(plots, text="XY trace (77fps mode)").grid(row=0, column=0, sticky="w")
+        ttk.Label(plots, text="XY trace (max-fps 11x11 mode)").grid(row=0, column=1, sticky="w")
+        self._stationary_review_xy77_label = ttk.Label(plots)
+        self._stationary_review_xy77_label.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        self._stationary_review_xymax_label = ttk.Label(plots)
+        self._stationary_review_xymax_label.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
+
+        hist_row = ttk.Frame(parent, padding=(8, 0, 8, 8))
+        hist_row.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        ttk.Label(hist_row, text="Accepted rods: theta coverage").pack(side=tk.TOP, anchor="w")
+        self._stationary_review_hist_label = ttk.Label(hist_row)
+        self._stationary_review_hist_label.pack(side=tk.TOP, anchor="w")
+
+        self._stationary_review_refresh()
+
     def _build_spotrec_ui(self, parent: tk.Widget) -> None:
         top = ttk.Frame(parent, padding=8)
         top.pack(side=tk.TOP, fill=tk.X)
@@ -1395,6 +1657,12 @@ class BasicVideoPlayer:
         dir_frame = ttk.Frame(plots)
         dir_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
         ttk.Label(dir_frame, textvariable=self._spotrec_dir_var).pack(side=tk.TOP, anchor="w")
+        ttk.Label(
+            dir_frame,
+            textvariable=self._spotrec_brownian_var,
+            wraplength=320,
+            justify="left",
+        ).pack(side=tk.TOP, anchor="w", pady=(2, 6))
         self._spotrec_dir_label = ttk.Label(dir_frame)
         self._spotrec_dir_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -1419,6 +1687,1311 @@ class BasicVideoPlayer:
             if (not self._spotrec_running) and (self._spotrec_proc is None) and (not self._live_running):
                 self._start_live_feed()
             self._start_spotrec_preview_loop()
+
+    def _set_selected_center_override(
+        self, center: Optional[tuple[float, float]], source: str = "analysis"
+    ) -> None:
+        if center is None:
+            self._selected_center_override = None
+            self._selected_center_source = "analysis"
+            return
+        cx, cy = center
+        self._selected_center_override = (float(cx), float(cy))
+        self._selected_center_source = str(source)
+
+    def _stationary_local_brightness(
+        self, gray_frame: np.ndarray, center: tuple[float, float], size: int = 7
+    ) -> float:
+        if gray_frame is None or gray_frame.ndim != 2:
+            return 0.0
+        win = self._extract_window(gray_frame, center[0], center[1], int(size))
+        if win is None or win.size == 0:
+            return 0.0
+        return float(np.mean(win))
+
+    def _stationary_seed_candidates_pre_dog(self) -> list[tuple[float, float]]:
+        """
+        Build a broad candidate list directly from bright regions in the raw frame,
+        i.e. independent of DoG center detection.
+        """
+        gray = None
+        if self._overlay_base_frame is not None and getattr(self._overlay_base_frame, "ndim", 0) == 2:
+            gray = self._overlay_base_frame
+        elif self.last_frame_gray is not None and getattr(self.last_frame_gray, "ndim", 0) == 2:
+            gray = self.last_frame_gray
+        if gray is None:
+            return []
+
+        work = np.asarray(gray, dtype=np.uint8)
+        if work.size == 0:
+            return []
+        if cv2 is not None:
+            try:
+                work = cv2.GaussianBlur(
+                    work,
+                    (0, 0),
+                    sigmaX=1.0,
+                    sigmaY=1.0,
+                    borderType=cv2.BORDER_REPLICATE,
+                )
+            except Exception:
+                pass
+
+        try:
+            thr = float(np.percentile(work, float(self.STATIONARY_SEED_BRIGHT_PCT)))
+        except Exception:
+            return []
+
+        mask = (work >= thr).astype(np.uint8)
+        if cv2 is not None:
+            try:
+                kernel = np.ones((3, 3), dtype=np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            except Exception:
+                pass
+
+        h, w = gray.shape
+        edge = int(self.EDGE_EXCLUDE_PX)
+        candidates: list[tuple[float, float]] = []
+        if cv2 is not None:
+            try:
+                n_labels, _labels, stats, centroids = cv2.connectedComponentsWithStats(
+                    mask, connectivity=8
+                )
+            except Exception:
+                n_labels = 0
+                stats = None
+                centroids = None
+            if n_labels > 1 and stats is not None and centroids is not None:
+                for i in range(1, int(n_labels)):
+                    area = int(stats[i, cv2.CC_STAT_AREA])
+                    if area < int(self.STATIONARY_SEED_MIN_AREA):
+                        continue
+                    cx = float(centroids[i, 0])
+                    cy = float(centroids[i, 1])
+                    if not np.isfinite(cx) or not np.isfinite(cy):
+                        continue
+                    if edge > 0 and (
+                        cx < float(edge)
+                        or cy < float(edge)
+                        or cx > float(w - 1 - edge)
+                        or cy > float(h - 1 - edge)
+                    ):
+                        continue
+                    candidates.append((cx, cy))
+
+        # Fallback: brightest non-overlapping pixels if connected-components was too sparse.
+        if not candidates:
+            ys, xs = np.where(mask > 0)
+            if xs.size > 0:
+                vals = work[ys, xs].astype(np.float32)
+                order = np.argsort(vals)[::-1]
+                min_sep = max(2.0, 0.5 * float(self._spot_window_size))
+                min_sep2 = float(min_sep * min_sep)
+                for j in order:
+                    x = float(xs[j])
+                    y = float(ys[j])
+                    if edge > 0 and (
+                        x < float(edge)
+                        or y < float(edge)
+                        or x > float(w - 1 - edge)
+                        or y > float(h - 1 - edge)
+                    ):
+                        continue
+                    too_close = False
+                    for (cx, cy) in candidates:
+                        dx = cx - x
+                        dy = cy - y
+                        if (dx * dx) + (dy * dy) < min_sep2:
+                            too_close = True
+                            break
+                    if too_close:
+                        continue
+                    candidates.append((x, y))
+                    if len(candidates) >= int(self.STATIONARY_MAX_CANDIDATES):
+                        break
+
+        if len(candidates) > int(self.STATIONARY_MAX_CANDIDATES):
+            scored = [
+                (self._stationary_local_brightness(gray, c, size=7), c)
+                for c in candidates
+            ]
+            scored.sort(key=lambda t: t[0], reverse=True)
+            candidates = [c for _b, c in scored[: int(self.STATIONARY_MAX_CANDIDATES)]]
+        return candidates
+
+    def _stationary_iter_gray_frames(self):
+        if self.source_kind == "avi":
+            with self._gray_lock:
+                frames = list(self._gray_frames)
+            for g in frames:
+                if g is not None and getattr(g, "ndim", 0) == 2:
+                    yield g
+            return
+
+        if self.source_kind != "npy" or self.npy_frames is None:
+            return
+
+        base_dir = Path(self.video_path).parent if self.video_path else None
+        if self.npy_has_frames_dim:
+            n = int(self._playback_frame_count())
+            for i in range(max(0, n)):
+                gray = _to_gray_u8(self.npy_frames[i])
+                if gray is None:
+                    continue
+                if self._source_shape is not None and tuple(gray.shape) != tuple(self._source_shape):
+                    continue
+                yield self._apply_flat_field(gray, base_dir=base_dir)
+            return
+
+        gray = _to_gray_u8(self.npy_frames)
+        if gray is None:
+            return
+        if self._source_shape is not None and tuple(gray.shape) != tuple(self._source_shape):
+            return
+        yield self._apply_flat_field(gray, base_dir=base_dir)
+
+    def _stationary_compute_xy_phi_for_centers(
+        self, centers: list[tuple[float, float]]
+    ) -> tuple[list[list[tuple[float, float]]], list[list[float]], int]:
+        xy_all = [[] for _ in centers]
+        phi_all = [[] for _ in centers]
+        if not centers:
+            return (xy_all, phi_all, 0)
+
+        shape = self._source_shape
+        if shape is None:
+            if self.last_frame_gray is not None and getattr(self.last_frame_gray, "ndim", 0) == 2:
+                shape = self.last_frame_gray.shape
+            elif self._overlay_base_frame is not None and getattr(self._overlay_base_frame, "ndim", 0) == 2:
+                shape = self._overlay_base_frame.shape
+        if shape is None:
+            return (xy_all, phi_all, 0)
+
+        h, w = int(shape[0]), int(shape[1])
+        ih = h // 2
+        iw = w // 2
+        win = max(1, int(round(self._spot_window_size / 2.0)))
+        if (win % 2) == 0:
+            win += 1
+        half = win // 2
+
+        bounds: list[tuple[int, int, int, int]] = []
+        for cx, cy in centers:
+            ix = int(round(float(cx) / 2.0))
+            iy = int(round(float(cy) / 2.0))
+            x0 = max(0, ix - half)
+            x1 = min(iw, ix + half + 1)
+            y0 = max(0, iy - half)
+            y1 = min(ih, iy + half + 1)
+            bounds.append((x0, x1, y0, y1))
+
+        eps = 1e-6
+        frames_used = 0
+        for gray in self._stationary_iter_gray_frames():
+            I0 = gray[0::2, 0::2]
+            I45 = gray[0::2, 1::2]
+            I135 = gray[1::2, 0::2]
+            I90 = gray[1::2, 1::2]
+
+            for i, (x0, x1, y0, y1) in enumerate(bounds):
+                a0 = I0[y0:y1, x0:x1]
+                a90 = I90[y0:y1, x0:x1]
+                a45 = I45[y0:y1, x0:x1]
+                a135 = I135[y0:y1, x0:x1]
+                m0 = float(a0.mean()) if a0.size else 0.0
+                m90 = float(a90.mean()) if a90.size else 0.0
+                m45 = float(a45.mean()) if a45.size else 0.0
+                m135 = float(a135.mean()) if a135.size else 0.0
+                x = (m0 - m90) / (m0 + m90 + eps)
+                y = (m45 - m135) / (m45 + m135 + eps)
+                xy_all[i].append((float(x), float(y)))
+                phi_all[i].append(float(0.5 * np.arctan2(y, x)))
+            frames_used += 1
+        return (xy_all, phi_all, frames_used)
+
+    def _stationary_series_metrics(self, series: list[tuple[float, float]]) -> Optional[dict]:
+        if not series:
+            return None
+        arr = np.asarray(series, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] < 1:
+            return None
+        x = arr[:, 0]
+        y = arr[:, 1]
+        r = np.sqrt((x * x) + (y * y))
+        return {
+            "n_frames": int(arr.shape[0]),
+            "r_mean": float(np.mean(r)),
+            "r_std": float(np.std(r)),
+            "motion": float(self._spot_xy_max_axis_range(series)),
+        }
+
+    def _refresh_stationary_candidates(self, preserve_selection: bool = True) -> None:
+        bright_min = self._parse_float(self._stationary_brightness_min_var.get())
+        r_min = self._parse_float(self._stationary_r_min_var.get())
+        motion_max = self._parse_float(self._stationary_motion_max_var.get())
+        if bright_min is None or r_min is None or motion_max is None:
+            messagebox.showerror(
+                "Stationary rods",
+                "Brightness / mean r / max XY range must all be numeric.",
+            )
+            return
+        if bright_min < 0.0:
+            messagebox.showerror("Stationary rods", "Min brightness must be >= 0.")
+            return
+        if r_min < 0.0:
+            messagebox.showerror("Stationary rods", "Min mean r must be >= 0.")
+            return
+        if motion_max < 0.0:
+            messagebox.showerror("Stationary rods", "Max XY range must be >= 0.")
+            return
+
+        seed_centers = self._stationary_seed_candidates_pre_dog()
+        frame_ref = self._overlay_base_frame
+        if frame_ref is None or getattr(frame_ref, "ndim", 0) != 2:
+            frame_ref = self.last_frame_gray
+        if frame_ref is None or getattr(frame_ref, "ndim", 0) != 2:
+            frame_ref = np.zeros((1, 1), dtype=np.uint8)
+
+        bright_centers: list[tuple[float, float]] = []
+        bright_vals: list[float] = []
+        for center in seed_centers:
+            b = self._stationary_local_brightness(frame_ref, center, size=7)
+            if float(b) >= float(bright_min):
+                bright_centers.append(center)
+                bright_vals.append(float(b))
+
+        xy_all, phi_all, frames_used = self._stationary_compute_xy_phi_for_centers(bright_centers)
+
+        candidates = []
+        keep_r = 0
+        for i, center in enumerate(bright_centers):
+            xy_series = list(xy_all[i]) if i < len(xy_all) else []
+            m = self._stationary_series_metrics(xy_series)
+            if m is None:
+                continue
+            if int(m["n_frames"]) < int(self.STATIONARY_MIN_FRAMES):
+                continue
+            if float(m["r_mean"]) < float(r_min):
+                continue
+            keep_r += 1
+            if float(m["motion"]) > float(motion_max):
+                continue
+            candidates.append(
+                {
+                    "center": center,
+                    "brightness": float(bright_vals[i]) if i < len(bright_vals) else 0.0,
+                    "xy": xy_series,
+                    "phi": list(phi_all[i]) if i < len(phi_all) else [],
+                    "r_mean": float(m["r_mean"]),
+                    "r_std": float(m["r_std"]),
+                    "motion": float(m["motion"]),
+                    "n_frames": int(m["n_frames"]),
+                }
+            )
+
+        candidates.sort(
+            key=lambda c: (
+                float(c["motion"]),
+                -float(c["r_mean"]),
+                -float(c["brightness"]),
+            )
+        )
+        self._stationary_candidates = candidates
+        self._stationary_idx = 0
+
+        if hasattr(self, "bottom_var"):
+            self.bottom_var.set(
+                f"Stationary pipeline: seeds {len(seed_centers)}, bright {len(bright_centers)}, "
+                f"r {keep_r}, final {len(candidates)} (frames={frames_used})."
+            )
+
+        if not candidates:
+            if self._selected_center_source == "stationary":
+                self._set_selected_center_override(None, source="analysis")
+            self._update_stationary_view()
+            self._update_spotrec_label()
+            self._spotrec_update_preview(gray_frame=self._live_last_frame)
+            return
+
+        target_idx = 0
+        if preserve_selection and self._selected_center_source == "stationary":
+            ov = self._selected_center_override
+            if ov is not None:
+                ov_key = self._spot_center_key(ov)
+                for i, c in enumerate(candidates):
+                    if self._spot_center_key(c["center"]) == ov_key:
+                        target_idx = i
+                        break
+
+        self._select_stationary_spot(target_idx)
+
+    def _update_stationary_view(self) -> None:
+        n = len(self._stationary_candidates)
+        if n <= 0:
+            self._stationary_status_var.set("Stationary 0 / 0")
+            self._stationary_metrics_var.set("No stationary candidates found.")
+            if self._stationary_prev_btn is not None:
+                self._stationary_prev_btn.configure(state=tk.DISABLED)
+            if self._stationary_next_btn is not None:
+                self._stationary_next_btn.configure(state=tk.DISABLED)
+            if self._stationary_spot_img_label is not None:
+                self._stationary_spot_img_label.configure(image="")
+            if self._stationary_xy_label is not None:
+                self._stationary_xy_label.configure(image="")
+            if self._stationary_phi_label is not None:
+                self._stationary_phi_label.configure(image="")
+            self._stationary_spot_ref = None
+            self._stationary_xy_ref = None
+            self._stationary_phi_ref = None
+            return
+
+        self._stationary_idx = max(0, min(int(self._stationary_idx), n - 1))
+        c = self._stationary_candidates[self._stationary_idx]
+        self._stationary_status_var.set(f"Stationary {self._stationary_idx + 1} / {n}")
+        self._stationary_metrics_var.set(
+            f"bright={float(c.get('brightness', 0.0)):.1f}  "
+            f"mean r={float(c['r_mean']):.3f}  std(r)={float(c['r_std']):.3f}  "
+            f"max range XY={float(c['motion']):.3f}  frames={int(c['n_frames'])}"
+        )
+        if self._stationary_prev_btn is not None:
+            self._stationary_prev_btn.configure(state=tk.NORMAL)
+        if self._stationary_next_btn is not None:
+            self._stationary_next_btn.configure(state=tk.NORMAL)
+
+        if self._s_map is not None and self._stationary_spot_img_label is not None:
+            cx, cy = c["center"]
+            win = self._extract_window(self._s_map, cx, cy, int(self._spot_window_size))
+            win_u8 = detect_spinners.to_u8_preview(win, lo_pct=0.0, hi_pct=100.0)
+            size_px = int(self._spot_window_size) * int(self._spot_scale)
+            img = Image.fromarray(win_u8).resize((size_px, size_px), resample=Image.NEAREST).convert("RGB")
+            img_tk = ImageTk.PhotoImage(img)
+            self._stationary_spot_img_label.configure(image=img_tk)
+            self._stationary_spot_ref = img_tk
+        elif self._stationary_spot_img_label is not None:
+            self._stationary_spot_img_label.configure(image="")
+            self._stationary_spot_ref = None
+
+        if self._stationary_xy_label is not None:
+            xy_img = self._make_xy_scatter_image(c["xy"])
+            xy_tk = ImageTk.PhotoImage(xy_img)
+            self._stationary_xy_label.configure(image=xy_tk)
+            self._stationary_xy_ref = xy_tk
+
+        if self._stationary_phi_label is not None:
+            phi_img = self._make_phi_plot_image(c["phi"], self.source_fps)
+            phi_tk = ImageTk.PhotoImage(phi_img)
+            self._stationary_phi_label.configure(image=phi_tk)
+            self._stationary_phi_ref = phi_tk
+
+    def _select_stationary_spot(self, idx: int) -> None:
+        if not self._stationary_candidates:
+            self._update_stationary_view()
+            return
+        self._stationary_idx = max(0, min(int(idx), len(self._stationary_candidates) - 1))
+        c = self._stationary_candidates[self._stationary_idx]
+        center = c["center"]
+        self._set_selected_center_override(center, source="stationary")
+
+        # If this spot is present in the currently filtered analysis list,
+        # keep both views aligned on the same index.
+        key = self._spot_center_key(center)
+        hit_idx = None
+        for i, pt in enumerate(self._spot_centers):
+            if self._spot_center_key(pt) == key:
+                hit_idx = i
+                break
+        if hit_idx is not None:
+            self._spot_idx = int(hit_idx)
+            self._update_spot_view()
+            self._rebuild_smap_overlay()
+
+        self._update_stationary_view()
+        self._update_spotrec_label()
+        self._spotrec_update_preview(gray_frame=self._live_last_frame)
+
+    def _prev_stationary_spot(self) -> None:
+        if not self._stationary_candidates:
+            return
+        self._select_stationary_spot((int(self._stationary_idx) - 1) % len(self._stationary_candidates))
+
+    def _next_stationary_spot(self) -> None:
+        if not self._stationary_candidates:
+            return
+        self._select_stationary_spot((int(self._stationary_idx) + 1) % len(self._stationary_candidates))
+
+    def _recordings_day_dir(self) -> Path:
+        day = time.strftime("%Y-%m-%d")
+        out = Path.cwd() / self.RECORDINGS_ROOT_DIRNAME / day
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+
+    def _recordings_subdir(self, kind: str) -> Path:
+        out = self._recordings_day_dir() / str(kind)
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+
+    def _stationary_dataset_paths(self) -> tuple[Path, Path, Path]:
+        root = Path.cwd() / self.STATIONARY_DATASET_DIRNAME
+        pending = root / self.STATIONARY_DATASET_PENDING_DIR
+        good = root / self.STATIONARY_DATASET_GOOD_DIR
+        pending.mkdir(parents=True, exist_ok=True)
+        good.mkdir(parents=True, exist_ok=True)
+        return root, pending, good
+
+    def _write_json_atomic(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        text = json.dumps(payload, indent=2, ensure_ascii=True)
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+
+    def _theta_from_model(self, r_value: float, a: float, b: float, c: float) -> Optional[float]:
+        try:
+            r = float(r_value)
+            den = float(b) - (float(c) * r)
+            if (not np.isfinite(r)) or (not np.isfinite(den)) or den <= 0.0:
+                return None
+            ratio = (float(a) * r) / den
+            if (not np.isfinite(ratio)) or ratio < 0.0 or ratio > 1.0:
+                return None
+            th = float(np.arcsin(np.sqrt(ratio)))
+            if not np.isfinite(th):
+                return None
+            return th
+        except Exception:
+            return None
+
+    def _theta_models_from_r(self, r_value: float) -> dict:
+        th_nohole = self._theta_from_model(
+            r_value, a=0.1895779531, b=0.6256149990, c=0.4867530374
+        )
+        th_hole = self._theta_from_model(
+            r_value, a=0.1865937176, b=0.5576753053, c=0.4215514426
+        )
+        out = {
+            "theta_nohole_rad": th_nohole,
+            "theta_nohole_deg": (float(np.degrees(th_nohole)) if th_nohole is not None else None),
+            "theta_hole_fresnel_rad": th_hole,
+            "theta_hole_fresnel_deg": (float(np.degrees(th_hole)) if th_hole is not None else None),
+        }
+        return out
+
+    def _stationary_xy_phi_from_stack(
+        self, arr: np.ndarray, roi_meta: dict
+    ) -> tuple[list[tuple[float, float]], list[float]]:
+        xy_series: list[tuple[float, float]] = []
+        phi_series: list[float] = []
+        if arr is None or arr.ndim < 3:
+            return (xy_series, phi_series)
+        total = int(arr.shape[0])
+        if total <= 0:
+            return (xy_series, phi_series)
+
+        roi_raw = int(roi_meta.get("win_raw", int(roi_meta.get("w", 11))))
+        roi_raw = max(1, int(roi_raw))
+        if (roi_raw % 2) == 0:
+            roi_raw += 1
+        for i in range(total):
+            try:
+                xv, yv, phi = self._xy_phi_from_frame(gray=np.asarray(arr[i]), roi_meta=roi_meta, win_raw=roi_raw)
+            except Exception:
+                continue
+            xy_series.append((float(xv), float(yv)))
+            phi_series.append(float(phi))
+        return (xy_series, phi_series)
+
+    def _xy_phi_from_frame(self, gray: np.ndarray, roi_meta: Optional[dict], win_raw: int) -> tuple[float, float, float]:
+        # Shared reduction path used by spot inspection and stationary-capture post-analysis.
+        if gray.ndim != 2:
+            g = gray[..., 0]
+        else:
+            g = gray
+
+        px = 0
+        py = 0
+        if roi_meta is not None:
+            try:
+                px = int(roi_meta.get("phase_x", int(roi_meta.get("x", 0)) % 2)) % 2
+                py = int(roi_meta.get("phase_y", int(roi_meta.get("y", 0)) % 2)) % 2
+            except Exception:
+                px = 0
+                py = 0
+
+        I0 = g[py::2, px::2]
+        I45 = g[py::2, (1 - px) :: 2]
+        I135 = g[(1 - py) :: 2, px::2]
+        I90 = g[(1 - py) :: 2, (1 - px) :: 2]
+
+        ih, iw = I0.shape
+        win_raw = max(1, int(win_raw))
+        if (win_raw % 2) == 0:
+            win_raw += 1
+        win = max(1, int(round(win_raw / 2.0)))
+        if win % 2 == 0:
+            win += 1
+        half = win // 2
+
+        cx = iw // 2
+        cy = ih // 2
+        if roi_meta is not None:
+            try:
+                cx_rel = float(roi_meta["cx"]) - float(roi_meta["x"])
+                cy_rel = float(roi_meta["cy"]) - float(roi_meta["y"])
+                cx = int(round(cx_rel / 2.0))
+                cy = int(round(cy_rel / 2.0))
+            except Exception:
+                pass
+
+        x0 = max(0, cx - half)
+        x1 = min(iw, cx + half + 1)
+        y0 = max(0, cy - half)
+        y1 = min(ih, cy + half + 1)
+
+        eps = 1e-6
+        a0 = I0[y0:y1, x0:x1]
+        a90 = I90[y0:y1, x0:x1]
+        a45 = I45[y0:y1, x0:x1]
+        a135 = I135[y0:y1, x0:x1]
+
+        m0 = float(a0.mean()) if a0.size else 0.0
+        m90 = float(a90.mean()) if a90.size else 0.0
+        m45 = float(a45.mean()) if a45.size else 0.0
+        m135 = float(a135.mean()) if a135.size else 0.0
+        x = (m0 - m90) / (m0 + m90 + eps)
+        y = (m45 - m135) / (m45 + m135 + eps)
+        phi = float(0.5 * np.arctan2(y, x))
+        return float(x), float(y), phi
+
+    def _stationary_series_full_metrics(self, series: list[tuple[float, float]]) -> dict:
+        if not series:
+            return {
+                "n_frames": 0,
+                "range_x": 0.0,
+                "range_y": 0.0,
+                "motion_max_axis_range": 0.0,
+                "r_mean": 0.0,
+                "r_std": 0.0,
+                "r_min": 0.0,
+                "r_max": 0.0,
+            }
+        arr = np.asarray(series, dtype=np.float32)
+        x = arr[:, 0]
+        y = arr[:, 1]
+        r = np.sqrt((x * x) + (y * y))
+        range_x = float(np.max(x) - np.min(x))
+        range_y = float(np.max(y) - np.min(y))
+        return {
+            "n_frames": int(arr.shape[0]),
+            "range_x": range_x,
+            "range_y": range_y,
+            "motion_max_axis_range": float(max(range_x, range_y)),
+            "r_mean": float(np.mean(r)),
+            "r_std": float(np.std(r)),
+            "r_min": float(np.min(r)),
+            "r_max": float(np.max(r)),
+        }
+
+    def _roi_from_target_center(self, center: tuple[float, float], roi_raw: int) -> dict:
+        # Shared camera-ROI placement rule used by Spot inspection and stationary capture.
+        cx, cy = center
+        roi_raw = max(1, int(roi_raw))
+        if (roi_raw % 2) == 0:
+            roi_raw += 1
+        w_cam = int(roi_raw)
+        h_cam = int(roi_raw)
+        x = int(round(float(cx))) - (w_cam // 2)
+        y = int(round(float(cy))) - (h_cam // 2)
+        if (x % 2) != 0:
+            x -= 1
+        if (y % 2) != 0:
+            y -= 1
+        x = max(0, x)
+        y = max(0, y)
+        return {
+            "x": int(x),
+            "y": int(y),
+            "w": int(w_cam),
+            "h": int(h_cam),
+            "roi_raw": int(roi_raw),
+            "cx": float(cx),
+            "cy": float(cy),
+            "phase_x": int(x) % 2,
+            "phase_y": int(y) % 2,
+        }
+
+    def _capture_stationary_mode(
+        self,
+        center: tuple[float, float],
+        out_path: Path,
+        roi_raw: int,
+        n_frames: int,
+        exp_ms: Optional[float],
+        requested_fps: Optional[float],
+        mode_name: str,
+        requested_duration_s: Optional[float],
+    ) -> dict:
+        roi_req = self._roi_from_target_center(center=center, roi_raw=int(roi_raw))
+        cx = float(roi_req["cx"])
+        cy = float(roi_req["cy"])
+        x = int(roi_req["x"])
+        y = int(roi_req["y"])
+        w_cam = int(roi_req["w"])
+        h_cam = int(roi_req["h"])
+        roi_raw = int(roi_req["roi_raw"])
+        n_frames = max(1, int(n_frames))
+        script = Path(__file__).resolve().parent / "fetch_frames.py"
+
+        def _run_fetch(req_fps: Optional[float]) -> tuple[Path, Optional[float], object]:
+            args = [
+                sys.executable,
+                str(script),
+                "--out-dir",
+                str(out_path.parent),
+                "--out-path",
+                str(out_path),
+                "--roi",
+                str(x),
+                str(y),
+                str(w_cam),
+                str(h_cam),
+                "--json",
+                "--n-frames",
+                str(n_frames),
+                "--stop-after",
+                str(n_frames),
+            ]
+            if req_fps is not None and float(req_fps) > 0.0:
+                args.extend(["--fps", str(float(req_fps))])
+            if exp_ms is not None and float(exp_ms) > 0.0:
+                args.extend(["--exp-ms", str(float(exp_ms))])
+            proc = subprocess.run(args, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                err = (proc.stderr or proc.stdout or "").strip()
+                raise RuntimeError(err or f"{mode_name} capture failed.")
+            payload = (proc.stdout or "").strip().splitlines()
+            if not payload:
+                raise RuntimeError(f"{mode_name} recorder produced no output.")
+            try:
+                data = json.loads(payload[-1])
+                path_l = Path(str(data.get("path", "")))
+                actual_fps_l = data.get("actual_fps")
+                actual_fps_l = float(actual_fps_l) if actual_fps_l is not None else None
+                roi_l = data.get("roi")
+                return path_l, actual_fps_l, roi_l
+            except Exception as e:
+                raise RuntimeError(f"{mode_name} output parse failed: {e}")
+
+        used_fps_fallback = False
+        try:
+            path, actual_fps, roi = _run_fetch(requested_fps)
+        except Exception:
+            if requested_fps is None or float(requested_fps) <= 0.0:
+                raise
+            # If requested fps is too high for this ROI/exposure, retry in auto/max-fps mode.
+            path, actual_fps, roi = _run_fetch(None)
+            used_fps_fallback = True
+
+        if not path.exists():
+            raise RuntimeError(f"{mode_name} recording file missing.")
+        try:
+            if path.resolve() != out_path.resolve():
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(path, out_path)
+                path = out_path
+        except Exception:
+            # Best effort: keep using the produced path if move/replace fails.
+            pass
+
+        arr = np.load(path, allow_pickle=False)
+        total = int(arr.shape[0]) if arr.ndim >= 3 else 0
+        if total <= 0:
+            if (not used_fps_fallback) and requested_fps is not None and float(requested_fps) > 0.0:
+                path, actual_fps, roi = _run_fetch(None)
+                used_fps_fallback = True
+                arr = np.load(path, allow_pickle=False)
+                total = int(arr.shape[0]) if arr.ndim >= 3 else 0
+            if total <= 0:
+                raise RuntimeError(f"{mode_name} capture produced 0 frames.")
+        roi_meta = {
+            "x": int(x),
+            "y": int(y),
+            "w": int(w_cam),
+            "h": int(h_cam),
+            "cx": float(cx),
+            "cy": float(cy),
+            "win_raw": int(roi_raw),
+            "phase_x": int(x) % 2,
+            "phase_y": int(y) % 2,
+        }
+        if isinstance(roi, dict):
+            try:
+                rx = roi.get("OffsetX", roi.get("x"))
+                ry = roi.get("OffsetY", roi.get("y"))
+                rw = roi.get("Width", roi.get("w"))
+                rh = roi.get("Height", roi.get("h"))
+                if rx is not None:
+                    roi_meta["x"] = int(round(float(rx)))
+                if ry is not None:
+                    roi_meta["y"] = int(round(float(ry)))
+                if rw is not None:
+                    roi_meta["w"] = int(round(float(rw)))
+                if rh is not None:
+                    roi_meta["h"] = int(round(float(rh)))
+                roi_meta["phase_x"] = int(roi_meta.get("x", 0)) % 2
+                roi_meta["phase_y"] = int(roi_meta.get("y", 0)) % 2
+            except Exception:
+                pass
+
+        xy_series, phi_series = self._stationary_xy_phi_from_stack(arr, roi_meta)
+        stats = self._stationary_series_full_metrics(xy_series)
+        theta_stats = self._theta_models_from_r(float(stats.get("r_mean", 0.0)))
+        fps_for_duration = (
+            float(actual_fps)
+            if actual_fps is not None and actual_fps > 0.0
+            else (float(requested_fps) if requested_fps is not None and requested_fps > 0.0 else None)
+        )
+        duration_s = (
+            (float(stats["n_frames"]) / float(fps_for_duration))
+            if fps_for_duration is not None and fps_for_duration > 0.0
+            else None
+        )
+
+        mode_meta = {
+            "mode_name": mode_name,
+            "npy_file": path.name,
+            "center_px": {"x": float(cx), "y": float(cy)},
+            "requested": {
+                "fps": (float(requested_fps) if requested_fps is not None else None),
+                "exp_ms": (float(exp_ms) if exp_ms is not None else None),
+                "duration_s": (
+                    float(requested_duration_s) if requested_duration_s is not None else None
+                ),
+                "target_frames": int(n_frames),
+                "fov_raw_px": int(roi_raw),
+            },
+            "actual": {
+                "fps": (float(actual_fps) if actual_fps is not None else None),
+                "fps_request_fallback_to_auto": bool(used_fps_fallback),
+                "frames": int(stats["n_frames"]),
+                "duration_s": (float(duration_s) if duration_s is not None else None),
+                "roi": roi_meta,
+            },
+            "xy_metrics": stats,
+            "theta_estimate": theta_stats,
+            "xy_series": [[float(a), float(b)] for (a, b) in xy_series],
+            "phi_series": [float(v) for v in phi_series],
+        }
+        meta_path = path.with_name(path.stem + "_meta.json")
+        self._write_json_atomic(meta_path, mode_meta)
+        return mode_meta
+
+    def _stationary_capture_parse_config(self) -> Optional[dict]:
+        fps77 = self._parse_float(self._stationary_capture_77_fps_var.get())
+        exp77 = self._parse_float(self._stationary_capture_77_exp_ms_var.get())
+        dur77 = self._parse_float(self._stationary_capture_77_duration_s_var.get())
+        roi77 = self._parse_int(self._stationary_capture_77_roi_var.get())
+        exp_max = self._parse_float(self._stationary_capture_max_exp_ms_var.get())
+        dur_max = self._parse_float(self._stationary_capture_max_duration_s_var.get())
+        max_fps_est = self._parse_float(self._stationary_capture_max_fps_est_var.get())
+
+        if fps77 is None or fps77 <= 0.0:
+            messagebox.showerror("Stationary capture", "77fps-mode FPS must be > 0.")
+            return None
+        if exp77 is None or exp77 <= 0.0:
+            messagebox.showerror("Stationary capture", "77fps-mode exposure must be > 0 ms.")
+            return None
+        if dur77 is None or dur77 <= 0.0:
+            messagebox.showerror("Stationary capture", "77fps-mode duration must be > 0 s.")
+            return None
+        if roi77 is None or roi77 < 3:
+            messagebox.showerror("Stationary capture", "77fps-mode FOV must be an odd integer >= 3.")
+            return None
+        if (int(roi77) % 2) == 0:
+            roi77 = int(roi77) + 1
+            self._stationary_capture_77_roi_var.set(str(int(roi77)))
+
+        if exp_max is None or exp_max <= 0.0:
+            messagebox.showerror("Stationary capture", "Max-fps-mode exposure must be > 0 ms.")
+            return None
+        if dur_max is None or dur_max <= 0.0:
+            messagebox.showerror("Stationary capture", "Max-fps-mode duration must be > 0 s.")
+            return None
+        if max_fps_est is None or max_fps_est <= 0.0:
+            messagebox.showerror("Stationary capture", "Max-fps estimate must be > 0.")
+            return None
+
+        n77 = max(1, int(round(float(dur77) * float(fps77))))
+        nmax = max(1, int(round(float(dur_max) * float(max_fps_est))))
+        return {
+            "fps77": float(fps77),
+            "exp77": float(exp77),
+            "dur77": float(dur77),
+            "roi77": int(roi77),
+            "n77": int(n77),
+            "exp_max": float(exp_max),
+            "dur_max": float(dur_max),
+            "max_fps_est": float(max_fps_est),
+            "nmax": int(nmax),
+            "roi_max": int(self.STATIONARY_REC_MAX_ROI_RAW),
+        }
+
+    def _set_stationary_capture_busy(self, busy: bool) -> None:
+        if self._stationary_capture_selected_btn is not None:
+            self._stationary_capture_selected_btn.configure(
+                state=(tk.DISABLED if busy else tk.NORMAL)
+            )
+        if self._stationary_capture_all_btn is not None:
+            self._stationary_capture_all_btn.configure(
+                state=(tk.DISABLED if busy else tk.NORMAL)
+            )
+
+    def _stationary_capture_selected(self) -> None:
+        if not self._stationary_candidates:
+            messagebox.showerror("Stationary capture", "No stationary rod selected.")
+            return
+        idx = max(0, min(int(self._stationary_idx), len(self._stationary_candidates) - 1))
+        target = dict(self._stationary_candidates[idx])
+        cfg = self._stationary_capture_parse_config()
+        if cfg is None:
+            return
+        self._stationary_capture_targets([target], cfg, capture_label="selected")
+
+    def _stationary_capture_all(self) -> None:
+        if not self._stationary_candidates:
+            messagebox.showerror("Stationary capture", "No stationary rods available.")
+            return
+        max_fps_est = self._parse_float(self._stationary_capture_max_fps_est_var.get())
+        if max_fps_est is None or max_fps_est <= 0.0:
+            messagebox.showerror(
+                "Stationary capture", "Max-fps estimate must be > 0 for Record all stationary."
+            )
+            return
+        n77 = max(1, int(round(self.STATIONARY_REC_ALL_77_DURATION_S * self.STATIONARY_REC_ALL_77_FPS)))
+        nmax = max(1, int(round(self.STATIONARY_REC_ALL_MAX_DURATION_S * float(max_fps_est))))
+        cfg = {
+            "fps77": float(self.STATIONARY_REC_ALL_77_FPS),
+            "exp77": float(self.STATIONARY_REC_ALL_77_EXP_MS),
+            "dur77": float(self.STATIONARY_REC_ALL_77_DURATION_S),
+            "roi77": int(self.STATIONARY_REC_ALL_77_ROI_RAW),
+            "n77": int(n77),
+            "exp_max": float(self.STATIONARY_REC_ALL_MAX_EXP_MS),
+            "dur_max": float(self.STATIONARY_REC_ALL_MAX_DURATION_S),
+            "max_fps_est": float(max_fps_est),
+            "nmax": int(nmax),
+            "roi_max": int(self.STATIONARY_REC_ALL_MAX_ROI_RAW),
+        }
+        targets = [dict(c) for c in self._stationary_candidates]
+        self._stationary_capture_targets(targets, cfg, capture_label="all")
+
+    def _stationary_capture_targets(
+        self, targets: list[dict], cfg: dict, capture_label: str
+    ) -> None:
+        with self._stationary_capture_lock:
+            if self._stationary_capture_running:
+                messagebox.showinfo("Stationary capture", "A stationary capture run is already active.")
+                return
+            self._stationary_capture_running = True
+        if self._spotrec_running or self._spotrec_proc is not None:
+            with self._stationary_capture_lock:
+                self._stationary_capture_running = False
+            messagebox.showerror("Stationary capture", "Stop Spot examine recording before capture.")
+            return
+        if self._live_running:
+            self._stop_live_feed()
+
+        self._set_stationary_capture_busy(True)
+        total = len(targets)
+        self._stationary_capture_status_var.set(
+            f"Starting stationary capture ({capture_label}) for {total} rod(s)..."
+        )
+
+        def _worker():
+            n_ok = 0
+            n_fail = 0
+            try:
+                _, pending_dir, _ = self._stationary_dataset_paths()
+                for i, cand in enumerate(targets, start=1):
+                    center = cand.get("center")
+                    if (
+                        center is None
+                        or not isinstance(center, (tuple, list))
+                        or len(center) < 2
+                    ):
+                        n_fail += 1
+                        continue
+                    cx = float(center[0])
+                    cy = float(center[1])
+                    off_x, off_y = self._spotrec_center_offset
+                    cx_cap = float(cx) + float(off_x)
+                    cy_cap = float(cy) + float(off_y)
+                    key = self._spot_center_key((cx_cap, cy_cap))
+                    token = f"{time.strftime('%Y%m%d-%H%M%S')}_{time.time_ns()}"
+                    rod_id = f"rod_x{key[0]}_y{key[1]}_{token}"
+                    rod_dir = pending_dir / rod_id
+                    rod_dir.mkdir(parents=True, exist_ok=True)
+
+                    self._ui_call(
+                        self._stationary_capture_status_var.set,
+                        f"Capturing rod {i}/{total}: {rod_id}",
+                    )
+                    mode77_path = rod_dir / "capture_77fps.npy"
+                    mode_max_path = rod_dir / "capture_maxfps_11x11.npy"
+                    try:
+                        mode77 = self._capture_stationary_mode(
+                            center=(cx_cap, cy_cap),
+                            out_path=mode77_path,
+                            roi_raw=int(cfg["roi77"]),
+                            n_frames=int(cfg["n77"]),
+                            exp_ms=float(cfg["exp77"]),
+                            requested_fps=float(cfg["fps77"]),
+                            mode_name="77fps",
+                            requested_duration_s=float(cfg["dur77"]),
+                        )
+                        # Match Spot inspection behavior exactly:
+                        # each recording mode derives ROI directly from the same target center.
+                        cx_max = float(cx_cap)
+                        cy_max = float(cy_cap)
+                        mode_max = self._capture_stationary_mode(
+                            center=(cx_max, cy_max),
+                            out_path=mode_max_path,
+                            roi_raw=int(cfg["roi_max"]),
+                            n_frames=int(cfg["nmax"]),
+                            exp_ms=float(cfg["exp_max"]),
+                            # Request high fps; camera/controller should clamp to max achievable.
+                            requested_fps=float(cfg["max_fps_est"]),
+                            mode_name="maxfps_11x11",
+                            requested_duration_s=float(cfg["dur_max"]),
+                        )
+                        theta_nohole_deg = mode77.get("theta_estimate", {}).get("theta_nohole_deg")
+                        theta_hole_deg = mode77.get("theta_estimate", {}).get("theta_hole_fresnel_deg")
+                        rod_meta = {
+                            "rod_id": rod_id,
+                            "created_local": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "source_path": str(self.video_path) if self.video_path else None,
+                            "capture_type": "stationary_rod_dual_mode",
+                            "center_px": {"x": float(cx), "y": float(cy)},
+                            "capture_center_px": {
+                                "x": float(cx_cap),
+                                "y": float(cy_cap),
+                                "spotrec_offset_x": float(off_x),
+                                "spotrec_offset_y": float(off_y),
+                            },
+                            "candidate_metrics": {
+                                "brightness": float(cand.get("brightness", 0.0)),
+                                "r_mean": float(cand.get("r_mean", 0.0)),
+                                "r_std": float(cand.get("r_std", 0.0)),
+                                "max_range_xy": float(cand.get("motion", 0.0)),
+                                "n_frames": int(cand.get("n_frames", 0)),
+                            },
+                            "modes": {
+                                "capture_77fps_meta": "capture_77fps_meta.json",
+                                "capture_maxfps_11x11_meta": "capture_maxfps_11x11_meta.json",
+                                "capture_77fps_summary": {
+                                    "actual_fps": mode77.get("actual", {}).get("fps"),
+                                    "frames": mode77.get("actual", {}).get("frames"),
+                                    "duration_s": mode77.get("actual", {}).get("duration_s"),
+                                    "fov_raw_px": mode77.get("requested", {}).get("fov_raw_px"),
+                                    "r_mean": mode77.get("xy_metrics", {}).get("r_mean"),
+                                    "range_x": mode77.get("xy_metrics", {}).get("range_x"),
+                                    "range_y": mode77.get("xy_metrics", {}).get("range_y"),
+                                },
+                                "capture_maxfps_11x11_summary": {
+                                    "actual_fps": mode_max.get("actual", {}).get("fps"),
+                                    "frames": mode_max.get("actual", {}).get("frames"),
+                                    "duration_s": mode_max.get("actual", {}).get("duration_s"),
+                                    "fov_raw_px": mode_max.get("requested", {}).get("fov_raw_px"),
+                                    "r_mean": mode_max.get("xy_metrics", {}).get("r_mean"),
+                                    "range_x": mode_max.get("xy_metrics", {}).get("range_x"),
+                                    "range_y": mode_max.get("xy_metrics", {}).get("range_y"),
+                                },
+                            },
+                            "theta_nohole_deg": theta_nohole_deg,
+                            "theta_hole_fresnel_deg": theta_hole_deg,
+                        }
+                        self._write_json_atomic(rod_dir / "meta.json", rod_meta)
+                        n_ok += 1
+                        self._ui_call(
+                            self._stationary_capture_status_var.set,
+                            f"Captured rod {i}/{total}: theta(nohole)={theta_nohole_deg}",
+                        )
+                    except Exception as e:
+                        n_fail += 1
+                        err_meta = {
+                            "rod_id": rod_id,
+                            "center_px": {"x": float(cx), "y": float(cy)},
+                            "error": str(e),
+                            "created_local": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                        try:
+                            self._write_json_atomic(rod_dir / "error.json", err_meta)
+                        except Exception:
+                            pass
+                        self._ui_call(
+                            self._stationary_capture_status_var.set,
+                            f"Capture failed for rod {i}/{total}: {e}",
+                        )
+            finally:
+                msg = f"Stationary capture finished: {n_ok} saved, {n_fail} failed."
+                self._ui_call(self._stationary_capture_status_var.set, msg)
+                self._ui_call(self.bottom_var.set, msg)
+                self._ui_call(self._stationary_review_refresh, True)
+                self._ui_call(self._set_stationary_capture_busy, False)
+                with self._stationary_capture_lock:
+                    self._stationary_capture_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _stationary_review_load_json(self, path: Path) -> Optional[dict]:
+        try:
+            if not path.exists():
+                return None
+            text = path.read_text(encoding="utf-8")
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            return None
+        return None
+
+    def _stationary_review_load_mode_meta(
+        self, rod_dir: Path, key: str, fallback_name: str
+    ) -> Optional[dict]:
+        root_meta = self._stationary_review_load_json(rod_dir / "meta.json") or {}
+        modes = root_meta.get("modes", {})
+        meta_name = None
+        if isinstance(modes, dict):
+            meta_name = modes.get(key)
+        if not meta_name:
+            meta_name = fallback_name
+        return self._stationary_review_load_json(rod_dir / str(meta_name))
+
+    def _stationary_review_refresh(self, preserve_selection: bool = False) -> None:
+        _, pending_dir, good_dir = self._stationary_dataset_paths()
+        pending_dirs = sorted([p for p in pending_dir.iterdir() if p.is_dir()])
+        good_dirs = sorted([p for p in good_dir.iterdir() if p.is_dir()])
+        prev_name = None
+        prev_state = None
+        if preserve_selection and self._stationary_review_items:
+            idx = max(
+                0,
+                min(int(self._stationary_review_idx), len(self._stationary_review_items) - 1),
+            )
+            prev_state, prev_dir = self._stationary_review_items[idx]
+            prev_name = prev_dir.name
+        # Review pane shows only pending rods; accepted ("good") rods are hidden.
+        items: list[tuple[str, Path]] = [("pending", p) for p in pending_dirs]
+        self._stationary_review_items = items
+        self._stationary_review_status_var.set(
+            f"Pending {len(pending_dirs)} | Good {len(good_dirs)} (hidden)"
+        )
+        if prev_name:
+            hit = None
+            for i, (state, p) in enumerate(items):
+                if p.name == prev_name and state == prev_state:
+                    hit = i
+                    break
+            if hit is None:
+                for i, (_, p) in enumerate(items):
+                    if p.name == prev_name:
+                        hit = i
+                        break
+            if hit is not None:
+                self._stationary_review_idx = int(hit)
+        self._stationary_review_update_theta_panel(good_dirs)
+        self._stationary_review_update_view()
+
+    def _stationary_review_update_theta_panel(self, good_dirs: list[Path]) -> None:
+        theta_vals: list[float] = []
+        for d in good_dirs:
+            meta = self._stationary_review_load_json(d / "meta.json") or {}
+            t = meta.get("theta_nohole_deg")
+            try:
+                if t is not None:
+                    t_f = float(t)
+                    if np.isfinite(t_f):
+                        theta_vals.append(t_f)
+            except Exception:
+                continue
+
+        if theta_vals:
+            arr = np.asarray(theta_vals, dtype=np.float64)
+            bins = np.arange(0.0, 100.0, 10.0)
+            hist, edges = np.histogram(arr, bins=bins)
+            parts = []
+            for i in range(len(hist)):
+                a = int(round(edges[i]))
+                b = int(round(edges[i + 1]))
+                parts.append(f"{a}-{b}:{int(hist[i])}")
+            self._stationary_review_theta_var.set(
+                f"Accepted theta(nohole, deg): n={arr.size}  " + " | ".join(parts)
+            )
+        else:
+            self._stationary_review_theta_var.set("Accepted theta(nohole, deg): n=0")
+
+        img = self._stationary_review_theta_image(theta_vals)
+        if self._stationary_review_hist_label is not None:
+            photo = ImageTk.PhotoImage(img)
+            self._stationary_review_hist_label.configure(image=photo)
+            self._stationary_review_hist_ref = photo
+
+    def _stationary_review_theta_image(self, theta_deg: list[float]) -> Image.Image:
+        if Figure is not None and FigureCanvas is not None:
+            fig = Figure(figsize=(3.2, 2.0), dpi=100)
+            ax = fig.add_subplot(111)
+            if theta_deg:
+                bins = np.arange(0.0, 100.0, 10.0)
+                ax.hist(theta_deg, bins=bins, color="tab:blue", alpha=0.85, edgecolor="black")
+            else:
+                ax.text(0.5, 0.5, "No accepted rods yet", ha="center", va="center", fontsize=9)
+                ax.set_xlim(0.0, 90.0)
+            ax.set_xlabel("theta (deg)", fontsize=8)
+            ax.set_ylabel("count", fontsize=8)
+            ax.tick_params(labelsize=8)
+            fig.tight_layout(pad=0.5)
+            return self._mpl_fig_to_image(fig)
+
+        w, h = 320, 200
+        img = Image.new("RGB", (w, h), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w - 1, h - 1), outline=(0, 0, 0))
+        if not theta_deg:
+            draw.text((12, 14), "No accepted rods yet", fill=(0, 0, 0))
+            return img
+        draw.text((12, 14), f"n={len(theta_deg)} theta values", fill=(0, 0, 0))
+        bins = np.arange(0.0, 100.0, 10.0)
+        hist, _ = np.histogram(np.asarray(theta_deg, dtype=np.float64), bins=bins)
+        y = 36
+        for i, c in enumerate(hist):
+            draw.text((12, y), f"{int(bins[i]):02d}-{int(bins[i+1]):02d}: {int(c)}", fill=(0, 0, 0))
+            y += 14
+        return img
+
+    def _stationary_review_prev(self) -> None:
+        if not self._stationary_review_items:
+            return
+        n = len(self._stationary_review_items)
+        self._stationary_review_idx = (int(self._stationary_review_idx) - 1) % n
+        self._stationary_review_update_view()
+
+    def _stationary_review_next(self) -> None:
+        if not self._stationary_review_items:
+            return
+        n = len(self._stationary_review_items)
+        self._stationary_review_idx = (int(self._stationary_review_idx) + 1) % n
+        self._stationary_review_update_view()
+
+    def _stationary_review_update_view(self) -> None:
+        n = len(self._stationary_review_items)
+        if n <= 0:
+            self._stationary_review_detail_var.set("No stationary recordings.")
+            if self._stationary_review_prev_btn is not None:
+                self._stationary_review_prev_btn.configure(state=tk.DISABLED)
+            if self._stationary_review_next_btn is not None:
+                self._stationary_review_next_btn.configure(state=tk.DISABLED)
+            if self._stationary_review_mark_chk is not None:
+                self._stationary_review_mark_chk.configure(state=tk.DISABLED)
+            if self._stationary_review_xy77_label is not None:
+                self._stationary_review_xy77_label.configure(image="")
+            if self._stationary_review_xymax_label is not None:
+                self._stationary_review_xymax_label.configure(image="")
+            self._stationary_review_xy77_ref = None
+            self._stationary_review_xymax_ref = None
+            self._stationary_review_include_sync = True
+            self._stationary_review_include_var.set(False)
+            self._stationary_review_include_sync = False
+            return
+
+        self._stationary_review_idx = max(0, min(int(self._stationary_review_idx), n - 1))
+        entry_state, rod_dir = self._stationary_review_items[self._stationary_review_idx]
+        is_pending = entry_state == "pending"
+        if self._stationary_review_prev_btn is not None:
+            self._stationary_review_prev_btn.configure(state=tk.NORMAL)
+        if self._stationary_review_next_btn is not None:
+            self._stationary_review_next_btn.configure(state=tk.NORMAL)
+        if self._stationary_review_mark_chk is not None:
+            self._stationary_review_mark_chk.configure(
+                state=(tk.NORMAL if is_pending else tk.DISABLED)
+            )
+
+        meta = self._stationary_review_load_json(rod_dir / "meta.json") or {}
+        m77 = self._stationary_review_load_mode_meta(
+            rod_dir, "capture_77fps_meta", "capture_77fps_meta.json"
+        ) or {}
+        mmax = self._stationary_review_load_mode_meta(
+            rod_dir, "capture_maxfps_11x11_meta", "capture_maxfps_11x11_meta.json"
+        ) or {}
+        xy77_raw = m77.get("xy_series", [])
+        xymax_raw = mmax.get("xy_series", [])
+        xy77 = [(float(v[0]), float(v[1])) for v in xy77_raw if isinstance(v, (list, tuple)) and len(v) >= 2]
+        xymax = [(float(v[0]), float(v[1])) for v in xymax_raw if isinstance(v, (list, tuple)) and len(v) >= 2]
+
+        if self._stationary_review_xy77_label is not None:
+            img77 = self._make_xy_scatter_image(xy77)
+            p77 = ImageTk.PhotoImage(img77)
+            self._stationary_review_xy77_label.configure(image=p77)
+            self._stationary_review_xy77_ref = p77
+        if self._stationary_review_xymax_label is not None:
+            imgm = self._make_xy_scatter_image(xymax)
+            pm = ImageTk.PhotoImage(imgm)
+            self._stationary_review_xymax_label.configure(image=pm)
+            self._stationary_review_xymax_ref = pm
+
+        t_nohole = meta.get("theta_nohole_deg")
+        t_hole = meta.get("theta_hole_fresnel_deg")
+        c = meta.get("center_px", {})
+        c_x = c.get("x")
+        c_y = c.get("y")
+        m77m = m77.get("xy_metrics", {})
+        fps77 = m77.get("actual", {}).get("fps")
+        fpsm = mmax.get("actual", {}).get("fps")
+        status_txt = "Pending" if is_pending else "Good"
+        detail = (
+            f"{status_txt} {self._stationary_review_idx + 1}/{n}  |  {rod_dir.name}\n"
+            f"center=({c_x}, {c_y})  theta_nohole={t_nohole} deg  theta_hole+fresnel={t_hole} deg\n"
+            f"77fps: fps={fps77} frames={m77.get('actual', {}).get('frames')} "
+            f"fov={m77.get('requested', {}).get('fov_raw_px')} "
+            f"rangeX={m77m.get('range_x')} rangeY={m77m.get('range_y')} r_mean={m77m.get('r_mean')}\n"
+            f"maxfps-11x11: fps={fpsm} frames={mmax.get('actual', {}).get('frames')}"
+        )
+        self._stationary_review_detail_var.set(detail)
+
+        self._stationary_review_include_sync = True
+        self._stationary_review_include_var.set(False)
+        self._stationary_review_include_sync = False
+
+    def _on_stationary_review_include_toggle(self) -> None:
+        if self._stationary_review_include_sync:
+            return
+        if bool(self._stationary_review_include_var.get()):
+            self._stationary_review_mark_current_good()
+
+    def _stationary_review_mark_current_good(self) -> None:
+        if not self._stationary_review_items:
+            self._stationary_review_include_sync = True
+            self._stationary_review_include_var.set(False)
+            self._stationary_review_include_sync = False
+            return
+        idx = max(0, min(int(self._stationary_review_idx), len(self._stationary_review_items) - 1))
+        entry_state, src = self._stationary_review_items[idx]
+        if entry_state != "pending":
+            self._stationary_review_include_sync = True
+            self._stationary_review_include_var.set(False)
+            self._stationary_review_include_sync = False
+            return
+        _, _, good_dir = self._stationary_dataset_paths()
+        dst = good_dir / src.name
+        if dst.exists():
+            dst = good_dir / f"{src.name}_{time.time_ns()}"
+        try:
+            shutil.move(str(src), str(dst))
+            self.bottom_var.set(f"Moved to good: {dst.name}")
+        except Exception as e:
+            messagebox.showerror("Stationary review", f"Could not move folder: {e}")
+        self._stationary_review_include_sync = True
+        self._stationary_review_include_var.set(False)
+        self._stationary_review_include_sync = False
+        self._stationary_review_refresh(True)
 
     def _reset_live_tracking(self, keep_shift: bool = False) -> None:
         self._live_track_prev = None
@@ -1465,11 +3038,8 @@ class BasicVideoPlayer:
     def _update_live_tracking(self, frame8: np.ndarray) -> None:
         if frame8 is None or getattr(frame8, "ndim", 0) != 2:
             return
-        if not self._spot_centers:
-            self._reset_live_tracking(keep_shift=False)
-            return
-        idx = int(self._spot_idx)
-        if idx < 0 or idx >= len(self._spot_centers):
+        selected_center = self._get_selected_spot_center(tracked=False)
+        if selected_center is None:
             self._reset_live_tracking(keep_shift=False)
             return
         interval = max(1, int(self._live_track_interval))
@@ -1534,10 +3104,13 @@ class BasicVideoPlayer:
             return
 
     def _get_selected_spot_center(self, tracked: bool = True) -> Optional[tuple[float, float]]:
-        if not self._spot_centers:
-            return None
-        idx = max(0, min(int(self._spot_idx), len(self._spot_centers) - 1))
-        cx, cy = self._spot_centers[idx]
+        if self._selected_center_override is not None:
+            cx, cy = self._selected_center_override
+        else:
+            if not self._spot_centers:
+                return None
+            idx = max(0, min(int(self._spot_idx), len(self._spot_centers) - 1))
+            cx, cy = self._spot_centers[idx]
         cx = float(cx)
         cy = float(cy)
         if tracked:
@@ -1813,15 +3386,25 @@ class BasicVideoPlayer:
             return
 
     def _update_spotrec_label(self) -> None:
-        if not self._spot_centers:
+        center = self._get_selected_spot_center(tracked=False)
+        if center is None:
             self._spotrec_spot_var.set("Spot - / -")
             if self._spotrec_start_btn is not None and not self._spotrec_running:
                 self._spotrec_start_btn.state(["disabled"])
             self._spotrec_update_preview()
             return
-        n = len(self._spot_centers)
-        idx = max(0, min(self._spot_idx, n - 1))
-        self._spotrec_spot_var.set(f"Spot {idx + 1} / {n}")
+
+        if self._selected_center_source == "stationary" and self._stationary_candidates:
+            n = len(self._stationary_candidates)
+            idx = max(0, min(int(self._stationary_idx), n - 1))
+            self._spotrec_spot_var.set(f"Stationary {idx + 1} / {n}")
+        elif self._spot_centers:
+            n = len(self._spot_centers)
+            idx = max(0, min(int(self._spot_idx), n - 1))
+            self._spotrec_spot_var.set(f"Spot {idx + 1} / {n}")
+        else:
+            self._spotrec_spot_var.set("Spot selected")
+
         if self._spotrec_start_btn is not None and not self._spotrec_running:
             self._spotrec_start_btn.state(["!disabled"])
         self._spotrec_update_preview()
@@ -1883,9 +3466,6 @@ class BasicVideoPlayer:
 
     def _spotrec_update_preview(self, gray_frame: Optional[np.ndarray] = None) -> None:
         if self._spotrec_preview_label is None:
-            return
-        if not self._spot_centers:
-            self._spotrec_preview_label.configure(image="")
             return
         center = self._get_selected_spot_center(tracked=False)
         if center is None:
@@ -2033,7 +3613,7 @@ class BasicVideoPlayer:
             self._spot_play_btn.configure(state=tk.DISABLED)
 
     def _on_spotrec_preview_click(self, event) -> None:
-        if not self._spot_centers:
+        if self._get_selected_spot_center(tracked=False) is None:
             return
         win = int(self._spotrec_preview_size)
         scale = int(self._spotrec_preview_scale)
@@ -2075,67 +3655,9 @@ class BasicVideoPlayer:
             return
 
     def _spotrec_compute_xy_phi(self, gray: np.ndarray) -> tuple[float, float, float]:
-        # Match tab-2 averaging order: compute I0/I45/I90/I135 planes, then mean over a window.
-        if gray.ndim != 2:
-            g = gray[..., 0]
-        else:
-            g = gray
         meta = getattr(self, "_spotrec_roi_meta", None)
-        px = 0
-        py = 0
-        if meta is not None:
-            try:
-                px = int(meta.get("phase_x", int(meta.get("x", 0)) % 2)) % 2
-                py = int(meta.get("phase_y", int(meta.get("y", 0)) % 2)) % 2
-            except Exception:
-                px = 0
-                py = 0
-
-        I90 = g[py::2, px::2]
-        I45 = g[py::2, (1 - px) :: 2]
-        I135 = g[(1 - py) :: 2, px::2]
-        I0 = g[(1 - py) :: 2, (1 - px) :: 2]
-
-        ih, iw = I0.shape
         win_raw = self._parse_int(self._spotrec_size_var.get()) or 7
-        win_raw = max(1, int(win_raw))
-        win = max(1, int(round(win_raw / 2.0)))
-        if win % 2 == 0:
-            win += 1
-        half = win // 2
-        # Default to ROI center, but prefer the recorded spot center if we know it.
-        cx = iw // 2
-        cy = ih // 2
-        meta = getattr(self, "_spotrec_roi_meta", None)
-        if meta is not None:
-            try:
-                # Compute spot center in this ROI using full-res coordinates.
-                cx_rel = float(meta["cx"]) - float(meta["x"])
-                cy_rel = float(meta["cy"]) - float(meta["y"])
-                cx = int(round(cx_rel / 2.0))
-                cy = int(round(cy_rel / 2.0))
-            except Exception:
-                pass
-        x0 = max(0, cx - half)
-        x1 = min(iw, cx + half + 1)
-        y0 = max(0, cy - half)
-        y1 = min(ih, cy + half + 1)
-
-        eps = 1e-6
-        a0 = I0[y0:y1, x0:x1]
-        a90 = I90[y0:y1, x0:x1]
-        a45 = I45[y0:y1, x0:x1]
-        a135 = I135[y0:y1, x0:x1]
-
-        m0 = float(a0.mean()) if a0.size else 0.0
-        m90 = float(a90.mean()) if a90.size else 0.0
-        m45 = float(a45.mean()) if a45.size else 0.0
-        m135 = float(a135.mean()) if a135.size else 0.0
-        x = (m0 - m90) / (m0 + m90 + eps)
-        y = (m45 - m135) / (m45 + m135 + eps)
-        # Polarization angle: half-angle of XY (range ~[-pi/2, pi/2]).
-        phi = float(0.5 * np.arctan2(y, x))
-        return float(x), float(y), phi
+        return self._xy_phi_from_frame(gray=np.asarray(gray), roi_meta=meta, win_raw=int(win_raw))
 
     def _spotrec_tick(self) -> None:
         if not self._spotrec_running:
@@ -2174,21 +3696,16 @@ class BasicVideoPlayer:
         w_user = max(1, int(w_user))
         if w_user % 2 == 0:
             w_user += 1
-        # Camera ROI should match the user-selected size.
-        w_cam = int(w_user)
-        h_cam = int(w_user)
         cx2 = float(cx) + float(off_x)
         cy2 = float(cy) + float(off_y)
-        x = int(round(cx2)) - (w_cam // 2)
-        y = int(round(cy2)) - (h_cam // 2)
-        if (x % 2) != 0:
-            x -= 1
-        if (y % 2) != 0:
-            y -= 1
-        x = max(0, x)
-        y = max(0, y)
+        roi_req = self._roi_from_target_center(center=(cx2, cy2), roi_raw=int(w_user))
+        x = int(roi_req["x"])
+        y = int(roi_req["y"])
+        w_cam = int(roi_req["w"])
+        h_cam = int(roi_req["h"])
+        w_user = int(roi_req["roi_raw"])
 
-        out_dir = Path.cwd() / "spotrec_runs"
+        out_dir = self._recordings_subdir(self.RECORDINGS_SPOT_DIRNAME)
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
         out_path = out_dir / f"spotrec_{ts}.npy"
@@ -2428,6 +3945,7 @@ class BasicVideoPlayer:
 
         xy = list(self._spotrec_xy_series)
         phi = list(self._spotrec_phi_series)
+        self._update_spotrec_brownian_label(phi, fps)
 
         if self._spotrec_xy_label is not None:
             img = self._make_xy_scatter_image(xy)
@@ -2495,25 +4013,21 @@ class BasicVideoPlayer:
             if dest.exists():
                 if not messagebox.askyesno("Overwrite", "File exists. Overwrite?"):
                     return
-            os.replace(self._spotrec_tmp_path, dest)
-            self._spotrec_tmp_path = dest
-            self._spotrec_status_var.set(f"Saved: {dest.name}")
+            shutil.copy2(self._spotrec_tmp_path, dest)
+            self._spotrec_status_var.set(f"Saved copy: {dest.name}")
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
 
     def _spotrec_discard(self) -> None:
         if self._spotrec_tmp_path is None:
             return
-        try:
-            Path(self._spotrec_tmp_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+        kept_name = Path(self._spotrec_tmp_path).name
         self._spotrec_tmp_path = None
         if self._spotrec_save_btn is not None:
             self._spotrec_save_btn.state(["disabled"])
         if self._spotrec_discard_btn is not None:
             self._spotrec_discard_btn.state(["disabled"])
-        self._spotrec_status_var.set("Discarded.")
+        self._spotrec_status_var.set(f"Discarded from UI (kept file: {kept_name})")
 
     def _on_smap_click(self, event) -> None:
         """
@@ -2545,6 +4059,7 @@ class BasicVideoPlayer:
         if float(d2[i]) > gate * gate:
             return
 
+        self._set_selected_center_override(None, source="analysis")
         self._spot_idx = i
         self._update_spot_view()
         self._rebuild_smap_overlay()
@@ -2751,7 +4266,7 @@ class BasicVideoPlayer:
         x = max(0, x)
         y = max(0, y)
 
-        out_dir = Path.cwd() / "spotrec_runs"
+        out_dir = self._recordings_subdir(self.RECORDINGS_SPOT_DIRNAME)
         out_dir.mkdir(parents=True, exist_ok=True)
         token = f"{time.strftime('%Y%m%d-%H%M%S')}_{time.time_ns()}"
         key = self._spot_center_key(center)
@@ -2817,11 +4332,6 @@ class BasicVideoPlayer:
             arr = np.load(path, allow_pickle=False)
         except Exception as e:
             raise RuntimeError(f"Auto inspect could not load capture: {e}")
-        finally:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
         total = int(arr.shape[0]) if arr.ndim >= 3 else 0
         if total <= 0:
@@ -2877,10 +4387,10 @@ class BasicVideoPlayer:
             g = arr[i]
             if g.ndim != 2:
                 g = g[..., 0]
-            I90 = g[py::2, px::2]
+            I0 = g[py::2, px::2]
             I45 = g[py::2, (1 - px) :: 2]
             I135 = g[(1 - py) :: 2, px::2]
-            I0 = g[(1 - py) :: 2, (1 - px) :: 2]
+            I90 = g[(1 - py) :: 2, (1 - px) :: 2]
 
             ih, iw = I0.shape
             if ih <= 0 or iw <= 0:
@@ -3021,10 +4531,10 @@ class BasicVideoPlayer:
         ):
             self._update_spot_bounds_intensity(gray.shape)
 
-        I90 = gray[0::2, 0::2]
+        I0 = gray[0::2, 0::2]
         I45 = gray[0::2, 1::2]
         I135 = gray[1::2, 0::2]
-        I0 = gray[1::2, 1::2]
+        I90 = gray[1::2, 1::2]
 
         eps = 1e-6
         for i, (x0, x1, y0, y1) in enumerate(self._spot_bounds_int_all):
@@ -3061,10 +4571,10 @@ class BasicVideoPlayer:
             xy_series_all = self._spot_xy_series_all
             phi_series_all = self._spot_phi_series_all
 
-        I90 = gray[0::2, 0::2]
+        I0 = gray[0::2, 0::2]
         I45 = gray[0::2, 1::2]
         I135 = gray[1::2, 0::2]
-        I0 = gray[1::2, 1::2]
+        I90 = gray[1::2, 1::2]
 
         eps = 1e-6
         vals: list[tuple[float, float, float]] = []
@@ -3414,6 +4924,93 @@ class BasicVideoPlayer:
             raw = canvas.buffer_rgba()
             buf = np.asarray(raw, dtype=np.uint8).reshape((h, w, 4))[:, :, :3]
         return Image.fromarray(buf)
+
+    def _spotrec_brownian_metrics(self, phi_series: list[float], fs: float) -> Optional[dict]:
+        phi = np.asarray(phi_series, dtype=np.float64)
+        if phi.ndim != 1:
+            return None
+        phi = phi[np.isfinite(phi)]
+        if phi.size < 20:
+            return None
+        phi = np.unwrap(phi)
+
+        nphi = int(phi.size)
+        max_lag = int(max(5, min(nphi - 1, int(round(0.9 * (nphi - 1))))))
+        if max_lag < 5:
+            return None
+        if max_lag <= 2500:
+            lags = np.arange(1, max_lag + 1, dtype=np.int32)
+        else:
+            m = 2200
+            u = np.linspace(0.0, 1.0, m)
+            frac = 1.0 - np.power(1.0 - u, 3.0)
+            core = 1 + np.round(frac * float(max_lag - 1)).astype(np.int32)
+            head = np.arange(1, min(140, max_lag) + 1, dtype=np.int32)
+            tail = np.arange(max(1, max_lag - 320), max_lag + 1, dtype=np.int32)
+            lags = np.unique(np.concatenate([head, core, tail]).astype(np.int32))
+
+        fs_use = max(1e-9, float(fs))
+        tau = lags.astype(np.float64) / fs_use
+        msd = np.empty((lags.size,), dtype=np.float64)
+        for i, k in enumerate(lags):
+            delta = phi[k:] - phi[:-k]
+            msd[i] = float(np.mean(delta * delta)) if delta.size else np.nan
+
+        valid = np.isfinite(msd) & np.isfinite(tau) & (msd > 0.0) & (tau > 0.0)
+        alpha = float("nan")
+        r2_log = float("nan")
+        if int(np.count_nonzero(valid)) >= 5:
+            lt = np.log(tau[valid])
+            lm = np.log(msd[valid])
+            p = np.polyfit(lt, lm, 1)
+            alpha = float(p[0])
+            pred = np.polyval(p, lt)
+            ss_res = float(np.sum((lm - pred) ** 2))
+            ss_tot = float(np.sum((lm - np.mean(lm)) ** 2))
+            r2_log = (1.0 - (ss_res / ss_tot)) if ss_tot > 1e-18 else 1.0
+
+        alpha_tol = 0.25
+        r2_min = 0.95
+        is_brownian = bool(
+            np.isfinite(alpha)
+            and np.isfinite(r2_log)
+            and (abs(alpha - 1.0) <= alpha_tol)
+            and (r2_log >= r2_min)
+        )
+        return {
+            "tau": tau,
+            "msd": msd,
+            "max_lag": int(max_lag),
+            "lag_count": int(lags.size),
+            "alpha": alpha,
+            "r2_log": r2_log,
+            "alpha_tol": float(alpha_tol),
+            "r2_min": float(r2_min),
+            "is_brownian": is_brownian,
+        }
+
+    def _update_spotrec_brownian_label(self, phi_series: list[float], fs: float) -> None:
+        m = self._spotrec_brownian_metrics(phi_series, fs)
+        if m is None:
+            self._spotrec_brownian_var.set("Brownian: -")
+            return
+        alpha = float(m.get("alpha", float("nan")))
+        r2 = float(m.get("r2_log", float("nan")))
+        tol = float(m.get("alpha_tol", 0.25))
+        r2min = float(m.get("r2_min", 0.95))
+        n_lags = int(m.get("lag_count", 0))
+        tau = np.asarray(m.get("tau", []), dtype=np.float64)
+        max_lag_s = float(np.max(tau)) if tau.size else 0.0
+        if np.isfinite(alpha) and np.isfinite(r2):
+            verdict = "Likely Brownian" if bool(m.get("is_brownian", False)) else "Not Brownian"
+            self._spotrec_brownian_var.set(
+                f"Brownian: {verdict} | alpha={alpha:.3f}, R2={r2:.3f} "
+                f"(|alpha-1|<={tol:.2f}, R2>={r2min:.2f}) | lags={n_lags}, max lag={max_lag_s:.3g}s"
+            )
+            return
+        self._spotrec_brownian_var.set(
+            f"Brownian: need >=5 valid lag points | lags={n_lags}, max lag={max_lag_s:.3g}s"
+        )
 
     def _directionality_metrics(
         self, xy_series: list[tuple[float, float]], fps: float
@@ -3767,15 +5364,18 @@ class BasicVideoPlayer:
             # Only ring score changed; re-apply ring filter to current candidates.
             self._apply_ring_filter(force=True)
             self._update_spot_view()
+            self._refresh_stationary_candidates(True)
             return
 
         centers = self._find_centers_on_s_map(self._s_map)
+        self._set_selected_center_override(None, source="analysis")
         self._spot_idx = 0
         self._spot_inspect_overrides = {}
         self._recompute_xy_series(centers=centers)
         self._apply_ring_filter(force=True)
         self._show_st2_popup(self._s_map)
         self._update_spot_view()
+        self._refresh_stationary_candidates(False)
 
     def _update_spot_view(self) -> None:
         if not self._spot_centers or self._s_map is None:
@@ -3989,6 +5589,7 @@ class BasicVideoPlayer:
     def _prev_spot(self) -> None:
         if not self._spot_centers:
             return
+        self._set_selected_center_override(None, source="analysis")
         self._spot_idx = (self._spot_idx - 1) % len(self._spot_centers)
         self._update_spot_view()
         self._rebuild_smap_overlay()
@@ -3996,6 +5597,7 @@ class BasicVideoPlayer:
     def _next_spot(self) -> None:
         if not self._spot_centers:
             return
+        self._set_selected_center_override(None, source="analysis")
         self._spot_idx = (self._spot_idx + 1) % len(self._spot_centers)
         self._update_spot_view()
         self._rebuild_smap_overlay()
@@ -4079,10 +5681,10 @@ class BasicVideoPlayer:
         raw_win = self._extract_window(gray, cx, cy, win).astype(np.uint8, copy=False)
 
         # Intensity-plane computations (half-res), then expand back to full-res.
-        I90 = gray[0::2, 0::2]
+        I0 = gray[0::2, 0::2]
         I45 = gray[0::2, 1::2]
         I135 = gray[1::2, 0::2]
-        I0 = gray[1::2, 1::2]
+        I90 = gray[1::2, 1::2]
 
         ix = int(round(cx / 2.0))
         iy = int(round(cy / 2.0))
@@ -4548,9 +6150,13 @@ class BasicVideoPlayer:
         self._xy_frames_processed = 0
         self._phi_frames_processed = 0
         self._spot_idx = 0
+        self._set_selected_center_override(None, source="analysis")
+        self._stationary_candidates = []
+        self._stationary_idx = 0
         self._spotrec_preview_frame_i = 0
         self._reset_live_tracking(keep_shift=False)
         self._update_spot_view()
+        self._update_stationary_view()
 
         # Start recon thread (consumes queue, processes EVERY frame)
         H, W = gray0.shape
@@ -4841,6 +6447,7 @@ class BasicVideoPlayer:
             if self._s_map is not None:
                 self._ui_call(self._show_st2_popup, self._s_map)
             self._ui_call(self._update_spot_view)
+        self._ui_call(self._refresh_stationary_candidates, True)
         self._ui_call(self._show_finished, True)
         _append_timing_log(f"[SpotAnalysis] Total analysis time: {time.perf_counter() - t_recon_start:.3f}s")
 
@@ -4919,9 +6526,13 @@ class BasicVideoPlayer:
         self._xy_frames_processed = 0
         self._phi_frames_processed = 0
         self._spot_idx = 0
+        self._set_selected_center_override(None, source="analysis")
+        self._stationary_candidates = []
+        self._stationary_idx = 0
         with self._gray_lock:
             self._gray_frames = []
         self._update_spot_view()
+        self._update_stationary_view()
         if self._smap_canvas is not None:
             self._smap_canvas.delete("all")
             self._smap_bg_ref = None
