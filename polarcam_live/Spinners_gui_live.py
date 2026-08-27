@@ -315,23 +315,23 @@ class BasicVideoPlayer:
     STATIONARY_SEED_MIN_AREA = 2
     STATIONARY_MAX_CANDIDATES = 300
     STATIONARY_REC_77_FPS_DEFAULT = 77.0
-    STATIONARY_REC_77_EXP_MS_DEFAULT = 0.02
+    STATIONARY_REC_77_EXP_MS_DEFAULT = 0.6
     STATIONARY_REC_77_DURATION_S_DEFAULT = 5.0
     STATIONARY_REC_77_ROI_RAW_DEFAULT = 14
-    STATIONARY_REC_MAX_EXP_MS_DEFAULT = 0.02
+    STATIONARY_REC_MAX_EXP_MS_DEFAULT = 0.6
     STATIONARY_REC_MAX_DURATION_S_DEFAULT = 1.0
     STATIONARY_REC_MAX_FPS_EST_DEFAULT = 1640.0
     STATIONARY_REC_GAIN_DEFAULT = 1.0
     STATIONARY_REC_MAX_ROI_RAW = 14
     STATIONARY_REC_ALL_77_FPS = 77.0
-    STATIONARY_REC_ALL_77_EXP_MS = 0.02
+    STATIONARY_REC_ALL_77_EXP_MS = 0.6
     STATIONARY_REC_ALL_77_DURATION_S = 5.0
     STATIONARY_REC_ALL_77_ROI_RAW = 14
-    STATIONARY_REC_ALL_MAX_EXP_MS = 0.02
+    STATIONARY_REC_ALL_MAX_EXP_MS = 0.6
     STATIONARY_REC_ALL_MAX_DURATION_S = 1.0
     STATIONARY_REC_ALL_GAIN = 1.0
     STATIONARY_REC_ALL_MAX_ROI_RAW = 14
-    LIVE_STATIONARY_CAPTURE_EXP_MS = 0.02
+    LIVE_STATIONARY_CAPTURE_EXP_MS = 0.6
     LIVE_STATIONARY_CAPTURE_GAIN_ANALOG = 1.0
     LIVE_STATIONARY_CAPTURE_GAIN_DIGITAL = 1.0
     LIVE_STATIONARY_CAPTURE_FPS_REQUEST = 1640.0
@@ -362,7 +362,7 @@ class BasicVideoPlayer:
         },
     }
     STATIONARY_DATASET_DIRNAME = "stationary rods 25nm 02072026"
-    CAPTURE_DEFAULT_SAVE_DIRNAME = "tumbling 25nm glycerol"
+    CAPTURE_DEFAULT_SAVE_DIRNAME = "attempt240nmsoundonbuffer"
     STATIONARY_DATASET_PENDING_DIR = "pending"
     STATIONARY_DATASET_GOOD_DIR = "good"
     STATIONARY_DATASET_BAD_DIR = "bad"
@@ -1473,7 +1473,7 @@ class BasicVideoPlayer:
         # Fetch-frames controls
         self._fetch_busy = False
         self._fetch_sync_lock = False
-        self._fetch_exp_ms_var = tk.StringVar(value="0.02")
+        self._fetch_exp_ms_var = tk.StringVar(value="0.6")
         self._fetch_gain_analog_var = tk.StringVar(value="1.0")
         self._fetch_fps_var = tk.StringVar(value="78")
         self._fetch_n_var = tk.StringVar(value="150")
@@ -1542,8 +1542,9 @@ class BasicVideoPlayer:
         self._spotrec_out_path = None
         self._spotrec_roi_meta = None
         self._spotrec_fps_var = tk.StringVar(value="2000")
-        self._spotrec_exp_ms_var = tk.StringVar(value="0.02")
+        self._spotrec_exp_ms_var = tk.StringVar(value="0.6")
         self._spotrec_gain_analog_var = tk.StringVar(value="1.0")
+        self._spotrec_background_subtract_var = tk.BooleanVar(value=True)
         self._spotrec_size_var = tk.StringVar(value="11")
         self._spotrec_spot_var = tk.StringVar(value="Spot - / -")
         self._spotrec_status_var = tk.StringVar(value="Idle")
@@ -1579,14 +1580,14 @@ class BasicVideoPlayer:
         self._spotrec_hand_ref = None
         self._live_start_btn = None
         self._live_stop_btn = None
-        self._live_exp_ms_var = tk.StringVar(value="0.05")
+        self._live_exp_ms_var = tk.StringVar(value="0.6")
         self._live_gain_var = tk.StringVar(value="20")
         self._live_status_var = tk.StringVar(value="Live feed stopped")
         self._live_theta_var = tk.StringVar(value="")
         self._live_mag_enabled_var = tk.BooleanVar(value=False)
         self._live_background_subtract_var = tk.BooleanVar(value=True)
         self._live_background_subtract_enabled = True
-        self._live_capture_background_subtract_var = tk.BooleanVar(value=False)
+        self._live_capture_background_subtract_var = tk.BooleanVar(value=True)
         self._live_background_capture_btn = None
         self._live_background_select_btn = None
         self._live_display_stretch_var = tk.BooleanVar(value=False)
@@ -1598,6 +1599,7 @@ class BasicVideoPlayer:
         self._live_xy_mode_var = tk.StringVar(value="Live XY (magnifier center)")
         self._live_zoom_var = tk.StringVar(value="8.0")
         self._live_zoom_center = None  # (x,y) in source frame pixels
+        self._live_zoom_center_var = tk.StringVar(value="Centre pixel: -")
         self._live_last_frame = None
         self._live_xy_series: list[tuple[float, float]] = []
         self._live_xy_series_maxlen = 180
@@ -1730,6 +1732,7 @@ class BasicVideoPlayer:
         self._stationary_capture_gain_analog_var = tk.StringVar(
             value=f"{self.STATIONARY_REC_GAIN_DEFAULT:.2f}"
         )
+        self._stationary_capture_background_subtract_var = tk.BooleanVar(value=True)
         self._stationary_capture_status_var = tk.StringVar(value="Stationary capture idle.")
         self._stationary_capture_running = False
         self._stationary_capture_lock = threading.Lock()
@@ -1908,6 +1911,9 @@ class BasicVideoPlayer:
         )
         self._live_zoom_label = tk.Label(right, bg="black")
         self._live_zoom_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        ttk.Label(right, textvariable=self._live_zoom_center_var, justify=tk.LEFT).pack(
+            side=tk.TOP, anchor="w", pady=(4, 0)
+        )
         self._live_mag_max_label = ttk.Label(right, textvariable=self._live_mag_max_var, justify=tk.LEFT)
         self._live_mag_max_label.pack(side=tk.TOP, anchor="w", pady=(4, 0))
         ttk.Label(right, text="Magnifier histogram").pack(side=tk.TOP, anchor="w", pady=(6, 0))
@@ -2178,7 +2184,7 @@ class BasicVideoPlayer:
         ttk.Entry(top, textvariable=self._stationary_r_min_var, width=8).pack(
             side=tk.LEFT, padx=(6, 12)
         )
-        ttk.Label(top, text="Max range XY").pack(side=tk.LEFT)
+        ttk.Label(top, text="Max XY p86-p14").pack(side=tk.LEFT)
         ttk.Entry(top, textvariable=self._stationary_motion_max_var, width=8).pack(
             side=tk.LEFT, padx=(6, 12)
         )
@@ -2217,6 +2223,11 @@ class BasicVideoPlayer:
         ttk.Entry(capture, textvariable=self._stationary_capture_max_fps_est_var, width=7).pack(
             side=tk.LEFT, padx=(4, 12)
         )
+        ttk.Checkbutton(
+            capture,
+            text="Subtract background",
+            variable=self._stationary_capture_background_subtract_var,
+        ).pack(side=tk.LEFT, padx=(0, 10))
         self._stationary_capture_selected_btn = ttk.Button(
             capture, text="Record selected", command=self._stationary_capture_selected
         )
@@ -2273,7 +2284,7 @@ class BasicVideoPlayer:
             self._stationary_review_sort_var.get(),
             "Newest first",
             "Brightness high to low",
-            "Max XY low to high",
+            "XY p86-p14 low to high",
             "Radius high to low",
         ).pack(side=tk.LEFT)
         ttk.Label(top, textvariable=self._stationary_review_status_var).pack(side=tk.LEFT, padx=(12, 0))
@@ -2348,6 +2359,11 @@ class BasicVideoPlayer:
         ttk.Entry(top, textvariable=self._spotrec_exp_ms_var, width=7).pack(side=tk.LEFT)
         ttk.Label(top, text="Analogue gain").pack(side=tk.LEFT, padx=(12, 0))
         ttk.Entry(top, textvariable=self._spotrec_gain_analog_var, width=7).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            top,
+            text="Subtract background",
+            variable=self._spotrec_background_subtract_var,
+        ).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(top, text="ROI size (sensor px)").pack(side=tk.LEFT, padx=(12, 0))
         ttk.Entry(top, textvariable=self._spotrec_size_var, width=5).pack(side=tk.LEFT)
         ttk.Button(top, text="Choose save folder", command=self._choose_spotrec_save_dir).pack(
@@ -2421,6 +2437,7 @@ class BasicVideoPlayer:
             self._stop_spotrec()
             self._stop_spotrec_preview_loop()
         else:
+            self._sync_live_zoom_center_to_selected_spot(reset_xy=True)
             if (
                 (not self._spotrec_running)
                 and (self._spotrec_proc is None)
@@ -2429,6 +2446,8 @@ class BasicVideoPlayer:
             ):
                 self._start_live_feed()
             self._start_spotrec_preview_loop()
+        if current == str(getattr(self, "_live_tab", "")):
+            self._sync_live_zoom_center_to_selected_spot(reset_xy=True)
 
     def _set_selected_center_override(
         self, center: Optional[tuple[float, float]], source: str = "analysis"
@@ -2690,11 +2709,14 @@ class BasicVideoPlayer:
         x = arr[:, 0]
         y = arr[:, 1]
         r = np.sqrt((x * x) + (y * y))
+        spread_x, spread_y, spread_max = self._stationary_xy_percentile_spread(series)
         return {
             "n_frames": int(arr.shape[0]),
             "r_mean": float(np.mean(r)),
             "r_std": float(np.std(r)),
-            "motion": float(self._spot_xy_max_axis_range(series)),
+            "xy_p14_p86_spread_x": float(spread_x),
+            "xy_p14_p86_spread_y": float(spread_y),
+            "motion": float(spread_max),
         }
 
     def _refresh_stationary_candidates(self, preserve_selection: bool = True) -> None:
@@ -2704,7 +2726,7 @@ class BasicVideoPlayer:
         if bright_min is None or r_min is None or motion_max is None:
             messagebox.showerror(
                 "Stationary rods",
-                "Brightness / mean r / max XY range must all be numeric.",
+                "Brightness / mean r / max XY p86-p14 must all be numeric.",
             )
             return
         if bright_min < 0.0:
@@ -2714,7 +2736,7 @@ class BasicVideoPlayer:
             messagebox.showerror("Stationary rods", "Min mean r must be >= 0.")
             return
         if motion_max < 0.0:
-            messagebox.showerror("Stationary rods", "Max XY range must be >= 0.")
+            messagebox.showerror("Stationary rods", "Max XY p86-p14 must be >= 0.")
             return
 
         seed_centers = self._stationary_seed_candidates_from_brightness()
@@ -2770,6 +2792,8 @@ class BasicVideoPlayer:
                         "r_mean": float(m["r_mean"]),
                         "r_std": float(m["r_std"]),
                         "motion": float(m["motion"]),
+                        "xy_p14_p86_spread_x": float(m["xy_p14_p86_spread_x"]),
+                        "xy_p14_p86_spread_y": float(m["xy_p14_p86_spread_y"]),
                         "n_frames": int(m["n_frames"]),
                     }
                 )
@@ -2805,6 +2829,8 @@ class BasicVideoPlayer:
                         "r_mean": float(m["r_mean"]),
                         "r_std": float(m["r_std"]),
                         "motion": float(m["motion"]),
+                        "xy_p14_p86_spread_x": float(m["xy_p14_p86_spread_x"]),
+                        "xy_p14_p86_spread_y": float(m["xy_p14_p86_spread_y"]),
                         "n_frames": int(m["n_frames"]),
                     }
                 )
@@ -2878,7 +2904,7 @@ class BasicVideoPlayer:
         self._stationary_metrics_var.set(
             f"bright={float(c.get('brightness', 0.0)):.1f}  "
             f"mean r={float(c['r_mean']):.3f}  std(r)={float(c['r_std']):.3f}  "
-            f"max range XY={float(c['motion']):.3f}  frames={int(c['n_frames'])}"
+            f"max XY p86-p14={float(c['motion']):.3f}  frames={int(c['n_frames'])}"
         )
         if self._stationary_prev_btn is not None:
             self._stationary_prev_btn.configure(state=tk.NORMAL)
@@ -2918,6 +2944,7 @@ class BasicVideoPlayer:
         c = self._stationary_candidates[self._stationary_idx]
         center = c["center"]
         self._set_selected_center_override(center, source="stationary")
+        self._set_live_zoom_center(center, reset_xy=bool(self._live_running))
 
         # If this spot is present in the currently filtered analysis list,
         # keep both views aligned on the same index.
@@ -3523,7 +3550,11 @@ class BasicVideoPlayer:
                 "n_frames": 0,
                 "range_x": 0.0,
                 "range_y": 0.0,
+                "xy_p14_p86_spread_x": 0.0,
+                "xy_p14_p86_spread_y": 0.0,
+                "xy_p14_p86_spread_max": 0.0,
                 "motion_max_axis_range": 0.0,
+                "motion_metric": "max(p86-p14 for X,Y)",
                 "r_mean": 0.0,
                 "r_std": 0.0,
                 "r_min": 0.0,
@@ -3535,16 +3566,35 @@ class BasicVideoPlayer:
         r = np.sqrt((x * x) + (y * y))
         range_x = float(np.max(x) - np.min(x))
         range_y = float(np.max(y) - np.min(y))
+        spread_x, spread_y, spread_max = self._stationary_xy_percentile_spread(series)
         return {
             "n_frames": int(arr.shape[0]),
             "range_x": range_x,
             "range_y": range_y,
-            "motion_max_axis_range": float(max(range_x, range_y)),
+            "xy_p14_p86_spread_x": float(spread_x),
+            "xy_p14_p86_spread_y": float(spread_y),
+            "xy_p14_p86_spread_max": float(spread_max),
+            "motion_max_axis_range": float(spread_max),
+            "motion_metric": "max(p86-p14 for X,Y)",
             "r_mean": float(np.mean(r)),
             "r_std": float(np.std(r)),
             "r_min": float(np.min(r)),
             "r_max": float(np.max(r)),
         }
+
+    def _stationary_xy_percentile_spread(
+        self, series: list[tuple[float, float]]
+    ) -> tuple[float, float, float]:
+        if not series:
+            return 0.0, 0.0, 0.0
+        arr = np.asarray(series, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] < 1:
+            return 0.0, 0.0, 0.0
+        x = arr[:, 0]
+        y = arr[:, 1]
+        spread_x = float(np.percentile(x, 86.0) - np.percentile(x, 14.0))
+        spread_y = float(np.percentile(y, 86.0) - np.percentile(y, 14.0))
+        return spread_x, spread_y, float(max(spread_x, spread_y))
 
     def _roi_from_target_center(self, center: tuple[float, float], roi_raw: int) -> dict:
         # Shared camera-ROI placement rule used by Spot inspection and stationary capture.
@@ -3819,6 +3869,7 @@ class BasicVideoPlayer:
             return None
 
         nmax = max(1, int(round(float(dur_max) * float(max_fps_est))))
+        subtract_background = bool(self._stationary_capture_background_subtract_var.get())
         return {
             "exp_max": float(exp_max),
             "dur_max": float(dur_max),
@@ -3827,6 +3878,7 @@ class BasicVideoPlayer:
             "max_fps_est": float(max_fps_est),
             "nmax": int(nmax),
             "roi_max": int(self.STATIONARY_REC_MAX_ROI_RAW),
+            "subtract_background": bool(subtract_background),
         }
 
     def _set_stationary_capture_busy(self, busy: bool) -> None:
@@ -3854,21 +3906,9 @@ class BasicVideoPlayer:
         if not self._stationary_candidates:
             messagebox.showerror("Stationary capture", "No stationary rods available.")
             return
-        gain_analog = self._parse_float(self._stationary_capture_gain_analog_var.get())
-        if gain_analog is None or gain_analog < 0.0:
-            messagebox.showerror("Stationary capture", "Analogue gain must be >= 0.")
+        cfg = self._stationary_capture_parse_config()
+        if cfg is None:
             return
-        max_fps_est = float(self.STATIONARY_REC_MAX_FPS_EST_DEFAULT)
-        nmax = max(1, int(round(self.STATIONARY_REC_ALL_MAX_DURATION_S * float(max_fps_est))))
-        cfg = {
-            "exp_max": float(self.STATIONARY_REC_ALL_MAX_EXP_MS),
-            "dur_max": float(self.STATIONARY_REC_ALL_MAX_DURATION_S),
-            "gain_analog": float(gain_analog),
-            "gain_digital": float(self.STATIONARY_REC_ALL_GAIN),
-            "max_fps_est": float(max_fps_est),
-            "nmax": int(nmax),
-            "roi_max": int(self.STATIONARY_REC_ALL_MAX_ROI_RAW),
-        }
         targets = [dict(c) for c in self._stationary_candidates]
         self._stationary_capture_targets(targets, cfg, capture_label="all")
 
@@ -3938,6 +3978,7 @@ class BasicVideoPlayer:
                             requested_fps=float(cfg["max_fps_est"]),
                             mode_name="maxfps_15x15",
                             requested_duration_s=float(cfg["dur_max"]),
+                            subtract_background=bool(cfg.get("subtract_background", False)),
                             sound_meta=sound_meta,
                         )
                         theta_est = dict(mode_max.get("theta_estimate", {}) or {})
@@ -3962,7 +4003,10 @@ class BasicVideoPlayer:
                                 "brightness": float(cand.get("brightness", 0.0)),
                                 "r_mean": float(cand.get("r_mean", 0.0)),
                                 "r_std": float(cand.get("r_std", 0.0)),
-                                "max_range_xy": float(cand.get("motion", 0.0)),
+                                "xy_p14_p86_spread_max": float(cand.get("motion", 0.0)),
+                                "xy_p14_p86_spread_x": float(cand.get("xy_p14_p86_spread_x", 0.0)),
+                                "xy_p14_p86_spread_y": float(cand.get("xy_p14_p86_spread_y", 0.0)),
+                                "motion_metric": "max(p86-p14 for X,Y)",
                                 "n_frames": int(cand.get("n_frames", 0)),
                             },
                             "modes": {
@@ -3972,6 +4016,9 @@ class BasicVideoPlayer:
                                     "frames": mode_max.get("actual", {}).get("frames"),
                                     "duration_s": mode_max.get("actual", {}).get("duration_s"),
                                     "fov_raw_px": mode_max.get("requested", {}).get("fov_raw_px"),
+                                    "background_subtract_requested": mode_max.get("requested", {}).get("background_subtract_requested"),
+                                    "background_subtracted": mode_max.get("actual", {}).get("background_subtracted"),
+                                    "background_profile_path": mode_max.get("actual", {}).get("background_profile_path"),
                                     "r_mean": mode_max.get("xy_metrics", {}).get("r_mean"),
                                     "range_x": mode_max.get("xy_metrics", {}).get("range_x"),
                                     "range_y": mode_max.get("xy_metrics", {}).get("range_y"),
@@ -4066,7 +4113,7 @@ class BasicVideoPlayer:
             r_mean = float("nan")
         if sort_mode == "Brightness high to low":
             return (0 if np.isfinite(brightness) else 1, -(brightness if np.isfinite(brightness) else 0.0), rod_dir.name)
-        if sort_mode == "Max XY low to high":
+        if sort_mode in ("XY p86-p14 low to high", "Max XY low to high"):
             return (0 if np.isfinite(motion) else 1, (motion if np.isfinite(motion) else float("inf")), rod_dir.name)
         if sort_mode == "Radius high to low":
             return (0 if np.isfinite(r_mean) else 1, -(r_mean if np.isfinite(r_mean) else 0.0), rod_dir.name)
@@ -5201,6 +5248,47 @@ class BasicVideoPlayer:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _set_live_zoom_center(
+        self, center: Optional[tuple[float, float]], reset_xy: bool = False
+    ) -> None:
+        if center is None:
+            self._update_live_zoom_center_label(None)
+            return
+        cx, cy = center
+        new_center = (float(cx), float(cy))
+        old_center = self._live_zoom_center
+        self._live_zoom_center = new_center
+        self._update_live_zoom_center_label(new_center)
+        if reset_xy:
+            changed = (
+                old_center is None
+                or abs(float(old_center[0]) - new_center[0]) > 0.5
+                or abs(float(old_center[1]) - new_center[1]) > 0.5
+            )
+            if changed:
+                self._live_xy_series = []
+                self._live_xy_center_last = new_center
+
+    def _sync_live_zoom_center_to_selected_spot(self, reset_xy: bool = False) -> bool:
+        center = self._get_selected_spot_center(tracked=False)
+        if center is None:
+            self._update_live_zoom_center_label(self._live_zoom_center)
+            return False
+        self._set_live_zoom_center(center, reset_xy=reset_xy)
+        return True
+
+    def _update_live_zoom_center_label(self, center: Optional[tuple[float, float]] = None) -> None:
+        if not hasattr(self, "_live_zoom_center_var"):
+            return
+        if center is None:
+            self._live_zoom_center_var.set("Centre pixel: -")
+            return
+        try:
+            cx, cy = center
+            self._live_zoom_center_var.set(f"Centre pixel: x={float(cx):.1f}, y={float(cy):.1f}")
+        except Exception:
+            self._live_zoom_center_var.set("Centre pixel: -")
+
     def _start_live_feed(self) -> None:
         if self._live_running:
             return
@@ -5220,6 +5308,7 @@ class BasicVideoPlayer:
             gain = 0.0
 
         self._reset_live_tracking(keep_shift=False)
+        self._sync_live_zoom_center_to_selected_spot(reset_xy=True)
         self._live_app = QApplication.instance() or QApplication([])
         self._live_queue = queue.Queue(maxsize=2)
         self._live_controller = Controller()
@@ -5379,6 +5468,7 @@ class BasicVideoPlayer:
                         if cx is None or cy is None:
                             cx = src_w / 2.0
                             cy = src_h / 2.0
+                        self._update_live_zoom_center_label((float(cx), float(cy)))
                         self._live_update_xy_preview(frame=frame, center=(float(cx), float(cy)))
                         half = win // 2
                         x0 = int(round(cx)) - half
@@ -5496,9 +5586,7 @@ class BasicVideoPlayer:
                 fcx, fcy = self._live_xy_frozen_center
                 if abs(float(fx) - float(fcx)) > 2.0 or abs(float(fy) - float(fcy)) > 2.0:
                     self._live_clear_captured_xy_freeze()
-            self._live_zoom_center = (float(fx), float(fy))
-            self._live_xy_series = []
-            self._live_xy_center_last = (float(fx), float(fy))
+            self._set_live_zoom_center((float(fx), float(fy)), reset_xy=True)
         except Exception:
             return
 
@@ -5798,6 +5886,7 @@ class BasicVideoPlayer:
         fps = self._parse_float(self._spotrec_fps_var.get())
         exp_ms = self._parse_float(self._spotrec_exp_ms_var.get())
         gain_analog = self._parse_float(self._spotrec_gain_analog_var.get())
+        subtract_background = bool(self._spotrec_background_subtract_var.get())
         if fps is None or fps <= 0.0:
             messagebox.showerror("Spot examine", "Frame rate must be > 0.")
             return
@@ -5867,6 +5956,8 @@ class BasicVideoPlayer:
             "--n-frames",
             "1000000",
         ]
+        if subtract_background:
+            args.append("--subtract-background")
 
         try:
             proc = subprocess.Popen(
@@ -5891,7 +5982,7 @@ class BasicVideoPlayer:
             "gain_digital": 1.0,
             "roi_raw": int(w_user),
             "preview_every": int(preview_every),
-            "background_subtract_requested": False,
+            "background_subtract_requested": bool(subtract_background),
         }
         self._spotrec_preview_mtime = None
         self._spotrec_preview_every = int(preview_every)
@@ -6056,15 +6147,16 @@ class BasicVideoPlayer:
                 self._spotrec_xy_series = xy_series
                 self._spotrec_phi_series = phi_series
                 self._spotrec_tmp_path = path
+                requested_meta = dict(getattr(self, "_spotrec_requested_meta", {}) or {})
                 bg_meta = self._background_metadata(
-                    False,
+                    bool(requested_meta.get("background_subtract_requested", False)),
                     actual=data.get("background_subtracted"),
                     profile_path=data.get("background_profile_path"),
                 )
                 self._write_recording_sidecar(
                     path,
                     recording_type="spotrec_magnified_roi",
-                    requested=dict(getattr(self, "_spotrec_requested_meta", {}) or {}),
+                    requested=requested_meta,
                     actual={
                         "fps": actual_fps,
                         "frames": total,
@@ -6587,7 +6679,7 @@ class BasicVideoPlayer:
         if not spots:
             return 0
 
-        exp_ms = 0.02
+        exp_ms = float(self.STATIONARY_REC_MAX_EXP_MS_DEFAULT)
         n_frames = int(self.AUTO_INSPECT_FRAMES)
         roi_raw = int(self.AUTO_INSPECT_ROI_RAW)
         total = len(spots)
@@ -7554,6 +7646,7 @@ class BasicVideoPlayer:
         self._set_spot_playback_enabled(True)
         self._spot_idx = max(0, min(self._spot_idx, n - 1))
         cx, cy = self._spot_centers[self._spot_idx]
+        self._set_live_zoom_center((cx, cy), reset_xy=bool(self._live_running))
         self._update_spotrec_label()
 
         cache_ok = (

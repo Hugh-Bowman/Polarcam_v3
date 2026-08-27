@@ -4,6 +4,7 @@ import math
 import threading
 import tkinter as tk
 import json
+import re
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
@@ -32,6 +33,72 @@ try:
     from scipy import stats as _scipy_stats  # type: ignore
 except Exception:
     _scipy_stats = None
+
+
+def _load_external_theta_models() -> dict[str, dict]:
+    models: dict[str, dict] = {
+        "hole+fresnel": {
+            "a": 0.1865937176,
+            "b": 0.5576753053,
+            "c": 0.4215514426,
+            "r_max": 0.9170101839,
+        },
+        "nohole": {
+            "a": 0.1895779531,
+            "b": 0.6256149990,
+            "c": 0.4867530374,
+            "r_max": 0.9250130600,
+        },
+    }
+    params_path = Path(__file__).resolve().parent / "theta_r_curve_parameters" / "theta_r_curve_parameters_water_glycerol99p5.json"
+    try:
+        payload = json.loads(params_path.read_text(encoding="utf-8"))
+        cases = dict(payload.get("cases") or {})
+        water = dict(cases.get("water") or {})
+        glycerol = dict(cases.get("glycerol99p5_approx") or {})
+        if water:
+            two_j3 = float(water["two_J3"])
+            j1_minus_j2 = float(water["J1_minus_J2"])
+            j1_plus_j2 = float(water["J1_plus_J2"])
+            models["water latest 1.3/0.39"] = {
+                # GUI uses theta(r) = asin(sqrt((a*r)/(b-c*r))), so load the
+                # coefficients from the saved sin-form curve, not the tan-form.
+                "a": two_j3,
+                "b": j1_minus_j2,
+                "c": j1_plus_j2 - two_j3,
+                "r_max": float(water["r_max"]),
+                "source": str(params_path),
+            }
+        models["water r_max (0.9208)"] = {
+            # Newer annular-water theta(r) curve from
+            # theta_r_curve_parameters/water1p33_glycerol1p47_naout1p3_nain0p39/theta_r_abc_values.csv
+            "a": 0.9134121735581628,
+            "b": 0.9511965525903582,
+            "c": 0.11957056359722706,
+            "r_max": 0.9208252165082128,
+            "source": str(
+                Path(__file__).resolve().parent
+                / "theta_r_curve_parameters"
+                / "water1p33_glycerol1p47_naout1p3_nain0p39"
+                / "theta_r_abc_values.csv"
+            ),
+        }
+        if glycerol:
+            two_j3 = float(glycerol["two_J3"])
+            j1_minus_j2 = float(glycerol["J1_minus_J2"])
+            j1_plus_j2 = float(glycerol["J1_plus_J2"])
+            models["glycerol99.5 latest 1.3/0.39"] = {
+                "a": two_j3,
+                "b": j1_minus_j2,
+                "c": j1_plus_j2 - two_j3,
+                "r_max": float(glycerol["r_max"]),
+                "source": str(params_path),
+            }
+    except Exception:
+        # Keep the built-in legacy models available even if the external parameter
+        # file is missing or unreadable.
+        pass
+    return models
 
 def _to_gray_u8(frame: np.ndarray) -> Optional[np.ndarray]:
     if frame is None:
@@ -145,20 +212,7 @@ class AngleDistributionApp:
     AVG_BIN_DEG = 6.0
     SPHERE_FIT_BINS_Z = 18
     SPHERE_FIT_BINS_PHI = 36
-    THETA_MODELS = {
-        "hole+fresnel": {
-            "a": 0.1865937176,
-            "b": 0.5576753053,
-            "c": 0.4215514426,
-            "r_max": 0.9170101839,
-        },
-        "nohole": {
-            "a": 0.1895779531,
-            "b": 0.6256149990,
-            "c": 0.4867530374,
-            "r_max": 0.9250130600,
-        },
-    }
+    THETA_MODELS = _load_external_theta_models()
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -399,8 +453,14 @@ class AngleDistributionApp:
         self._theta_model_box = ttk.Combobox(
             top,
             textvariable=self._theta_model_var,
-            values=["hole+fresnel", "nohole"],
-            width=14,
+            values=[
+                "hole+fresnel",
+                "nohole",
+                "water latest 1.3/0.39",
+                "water r_max (0.9208)",
+                "glycerol99.5 latest 1.3/0.39",
+            ],
+            width=22,
             state="readonly",
         )
         self._theta_model_box.pack(side=tk.LEFT)
@@ -487,10 +547,12 @@ class AngleDistributionApp:
         self._notebook = notebook
         tab_spot = ttk.Frame(notebook)
         tab_sphere = ttk.Frame(notebook)
+        tab_phi_theta = ttk.Frame(notebook)
         tab_arc = ttk.Frame(notebook)
         tab_spherical_heatmap = ttk.Frame(notebook)
         notebook.add(tab_spot, text="Spot View")
         notebook.add(tab_sphere, text="Unit Sphere")
+        notebook.add(tab_phi_theta, text="Phi/Theta")
         notebook.add(tab_arc, text="Arc Analysis")
         notebook.add(tab_spherical_heatmap, text="Spherical Heatmap")
 
@@ -555,6 +617,16 @@ class AngleDistributionApp:
         self._sphere_mpl_cid_press = sphere_canvas.mpl_connect("button_press_event", self._on_sphere_phi_press)
         self._sphere_mpl_cid_motion = sphere_canvas.mpl_connect("motion_notify_event", self._on_sphere_phi_motion)
         self._sphere_mpl_cid_release = sphere_canvas.mpl_connect("button_release_event", self._on_sphere_phi_release)
+
+        phi_theta_fig = Figure(figsize=(13, 5.5), dpi=100)
+        phi_theta_gs = phi_theta_fig.add_gridspec(3, 1, height_ratios=(0.78, 0.78, 0.92))
+        self._ax_phi_theta_clean_phi = phi_theta_fig.add_subplot(phi_theta_gs[0, 0])
+        self._ax_phi_theta_clean_theta = phi_theta_fig.add_subplot(phi_theta_gs[1, 0])
+        self._ax_phi_theta_clean_hist = phi_theta_fig.add_subplot(phi_theta_gs[2, 0])
+        self._phi_theta_fig = phi_theta_fig
+        phi_theta_canvas = FigureCanvasTkAgg(phi_theta_fig, master=tab_phi_theta)
+        self._phi_theta_canvas = phi_theta_canvas
+        phi_theta_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(8, 8))
 
         arc_top = ttk.Frame(tab_arc, padding=(8, 8, 8, 0))
         arc_top.pack(side=tk.TOP, fill=tk.X)
@@ -648,14 +720,40 @@ class AngleDistributionApp:
     def _on_load_many_inspection_npy(self) -> None:
         if self._busy:
             return
-        paths = filedialog.askopenfilenames(
-            title="Open many spot-inspection NumPy stacks",
-            filetypes=[("NumPy files", "*.npy"), ("All files", "*.*")],
-            initialdir=str(Path.cwd()),
-        )
-        if not paths:
+        selected_dirs: list[Path] = []
+        initialdir = str(Path.cwd())
+        while True:
+            picked = filedialog.askdirectory(
+                title="Select folder containing spot-inspection NumPy stacks",
+                initialdir=initialdir,
+                mustexist=True,
+            )
+            if not picked:
+                break
+            folder = Path(picked)
+            selected_dirs.append(folder)
+            initialdir = str(folder.parent if folder.parent.exists() else folder)
+            if not messagebox.askyesno("Load many inspection .npy", "Add another folder?"):
+                break
+        if not selected_dirs:
             return
-        self._start_processing_many([Path(p) for p in paths])
+        seen: set[Path] = set()
+        paths: list[Path] = []
+        for folder in selected_dirs:
+            try:
+                npy_paths = sorted(p for p in folder.rglob("*.npy") if p.is_file())
+            except Exception:
+                npy_paths = []
+            for path in npy_paths:
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                paths.append(resolved)
+        if not paths:
+            messagebox.showerror("Load many inspection .npy", "No .npy files were found in the selected folder(s).")
+            return
+        self._start_processing_many(paths)
 
     def _rerun_analysis(self) -> None:
         if self._busy:
@@ -1106,6 +1204,30 @@ class AngleDistributionApp:
                         return "off"
         return "unknown"
 
+    def _metadata_sound_summary(self, objs: list[object]) -> str:
+        keys = (
+            "sound_on",
+            "vibration_on",
+            "sound.enabled",
+            "vibration.enabled",
+        )
+        for obj in objs:
+            for key_path, val in self._walk_json_values(obj):
+                lname = key_path.lower()
+                if not any(k in lname for k in keys):
+                    continue
+                if isinstance(val, bool):
+                    return "on" if val else "off"
+                if isinstance(val, (int, float)):
+                    return "on" if bool(val) else "off"
+                if isinstance(val, str):
+                    v = val.strip().lower()
+                    if v in ("true", "yes", "on", "1"):
+                        return "on"
+                    if v in ("false", "no", "off", "0", "none"):
+                        return "off"
+        return "unknown"
+
     def _metadata_exposure_ms(self, objs: list[object]) -> Optional[float]:
         preferred: list[tuple[int, float]] = []
         for obj in objs:
@@ -1134,6 +1256,34 @@ class AngleDistributionApp:
             return None
         preferred.sort(key=lambda item: item[0])
         return float(preferred[0][1])
+
+    def _metadata_recording_time_text(self, path: Path, objs: list[object]) -> Optional[str]:
+        preferred_keys = (
+            "created_local",
+            "created",
+            "timestamp_local",
+            "recorded_local",
+            "capture_time_local",
+            "recording_time_local",
+        )
+        for obj in objs:
+            for key_path, val in self._walk_json_values(obj):
+                lname = key_path.lower()
+                if not any(lname.endswith(key) for key in preferred_keys):
+                    continue
+                if isinstance(val, str):
+                    txt = val.strip()
+                    if txt:
+                        return txt
+
+        for candidate in (path.parent.name, path.stem):
+            m = re.search(r"(20\d{6})-(\d{6})", str(candidate))
+            if not m:
+                continue
+            d = m.group(1)
+            t = m.group(2)
+            return f"{d[0:4]}-{d[4:6]}-{d[6:8]} {t[0:2]}:{t[2:4]}:{t[4:6]}"
+        return None
 
     def _mean_intensity_trace_for_vibration(
         self,
@@ -1221,12 +1371,18 @@ class AngleDistributionApp:
         shape: tuple[int, int],
     ) -> str:
         objs = self._sidecar_json_objects(path)
+        recorded_txt = self._metadata_recording_time_text(path, objs)
+        sound = self._metadata_sound_summary(objs)
         bg = self._metadata_background_summary(objs)
         exp_ms = self._metadata_exposure_ms(objs)
         exp_txt = f"{exp_ms:.4g} ms" if exp_ms is not None else "unknown"
-        trace = self._mean_intensity_trace_for_vibration(arr, has_frames_dim, frame_count, shape)
-        vib = self._vibration_summary_from_trace(trace, fps, frame_count)
-        return f"BG subtract: {bg} | exposure: {exp_txt} | vibration: {vib}"
+        parts = []
+        if recorded_txt:
+            parts.append(f"recorded: {recorded_txt}")
+        parts.append(f"sound: {sound}")
+        parts.append(f"BG subtract: {bg}")
+        parts.append(f"exposure: {exp_txt}")
+        return " | ".join(parts)
 
     def _extract_fps_from_obj(self, obj: object) -> Optional[float]:
         def parse_positive(v: object) -> Optional[float]:
@@ -1334,6 +1490,19 @@ class AngleDistributionApp:
                 return f
         f = float(self.source_fps)
         return f if f > 0.0 else 1.0
+
+    def _current_spot_center_text(self) -> str:
+        if self._analysis_mode != "widefield":
+            return ""
+        n = len(self._spot_centers)
+        if n <= 0:
+            return ""
+        idx = max(0, min(int(self._spot_idx), n - 1))
+        try:
+            cx, cy = self._spot_centers[idx]
+        except Exception:
+            return ""
+        return f" | center px=({float(cx):.1f}, {float(cy):.1f})"
 
     def _get_bin_deg(self, default: float = 9.0) -> float:
         try:
@@ -2832,6 +3001,7 @@ class AngleDistributionApp:
                 summary = str(self._spot_file_summaries[idx_name]).strip()
                 if summary:
                     extra = f" | {summary}"
+            extra += self._current_spot_center_text()
             if self._spot_names and idx_name < len(self._spot_names):
                 self._current_file_var.set(f"File: {self._spot_names[idx_name]}{extra}")
             elif self.source_path is not None:
@@ -3091,74 +3261,78 @@ class AngleDistributionApp:
         ax.clear()
         arr = np.asarray(u, dtype=np.float64)
         if arr.ndim != 2 or arr.shape[1] != 3 or arr.shape[0] == 0:
-            ax.set_title("Unit-sphere occupancy heatmap")
+            ax.set_title("Hemisphere occupancy")
             ax.text2D(0.5, 0.5, "No unit-sphere points", ha="center", va="center", transform=ax.transAxes)
             return
-
-        z = np.clip(arr[:, 2], -1.0, 1.0)
-        theta = np.arccos(z)
-        phi = np.mod(np.arctan2(arr[:, 1], arr[:, 0]), 2.0 * np.pi)
-        theta_bins = np.linspace(0.0, np.pi, 37)
-        phi_bins = np.linspace(0.0, 2.0 * np.pi, 73)
-        counts, _, _ = np.histogram2d(theta, phi, bins=(theta_bins, phi_bins))
-        ti = np.clip(np.searchsorted(theta_bins, theta, side="right") - 1, 0, counts.shape[0] - 1)
-        pi = np.clip(np.searchsorted(phi_bins, phi, side="right") - 1, 0, counts.shape[1] - 1)
-        density = counts[ti, pi].astype(np.float64, copy=False)
 
         max_points = 25000
         if arr.shape[0] > max_points:
             step = int(math.ceil(float(arr.shape[0]) / float(max_points)))
             keep = np.arange(0, arr.shape[0], step, dtype=np.int64)
             arr_plot = arr[keep]
-            density_plot = density[keep]
         else:
             arr_plot = arr
-            density_plot = density
-        order = np.argsort(density_plot)
-        arr_plot = arr_plot[order]
-        density_plot = density_plot[order]
 
-        uu = np.linspace(0.0, 2.0 * np.pi, 28)
-        vv = np.linspace(0.0, np.pi, 14)
+        uu = np.linspace(0.0, 2.0 * np.pi, 36)
+        vv = np.linspace(0.0, 0.5 * np.pi, 18)
         xs = np.outer(np.cos(uu), np.sin(vv))
         ys = np.outer(np.sin(uu), np.sin(vv))
         zs = np.outer(np.ones_like(uu), np.cos(vv))
-        ax.plot_wireframe(xs, ys, zs, color="0.88", linewidth=0.35, alpha=0.45)
+        ax.plot_wireframe(xs, ys, zs, color="0.74", linewidth=0.6, alpha=0.8)
         ax.scatter(
             arr_plot[:, 0],
             arr_plot[:, 1],
             arr_plot[:, 2],
-            c=density_plot,
-            cmap="inferno",
+            color="tab:blue",
             s=6,
-            alpha=0.88,
+            alpha=0.55,
             depthshade=False,
         )
-        ax.set_box_aspect((1, 1, 1))
-        ax.set_xlim(-1.05, 1.05)
-        ax.set_ylim(-1.05, 1.05)
-        ax.set_zlim(-1.05, 1.05)
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        ax.set_zlabel("z")
-        max_count = float(np.max(density)) if density.size else 0.0
-        ax.set_title(f"Unit-sphere occupancy heatmap ({arr.shape[0]} pts, max bin {max_count:.0f})")
+        self._style_hemisphere_axes(ax)
+        ax.set_title(f"Hemisphere occupancy ({arr.shape[0]} pts)")
 
     @staticmethod
     def _draw_spherical_grid(ax) -> None:
         uu = np.linspace(0.0, 2.0 * np.pi, 40)
-        vv = np.linspace(0.0, np.pi, 20)
+        vv = np.linspace(0.0, 0.5 * np.pi, 20)
         xs = np.outer(np.cos(uu), np.sin(vv))
         ys = np.outer(np.sin(uu), np.sin(vv))
         zs = np.outer(np.ones_like(uu), np.cos(vv))
-        ax.plot_wireframe(xs, ys, zs, color="0.84", linewidth=0.4, alpha=0.55)
-        ax.set_box_aspect((1, 1, 1))
+        ax.plot_wireframe(xs, ys, zs, color="0.72", linewidth=0.6, alpha=0.8)
+        rim = np.linspace(0.0, 2.0 * np.pi, 361)
+        ax.plot(np.cos(rim), np.sin(rim), np.zeros_like(rim), color="0.45", linewidth=1.2, alpha=0.95)
+        for az in np.deg2rad((0.0, 45.0, 90.0, 135.0)):
+            rr = np.linspace(0.0, 1.0, 80)
+            ax.plot(rr * np.cos(az), rr * np.sin(az), np.sqrt(np.maximum(0.0, 1.0 - (rr * rr))), color="0.65", linewidth=0.55, alpha=0.75)
+        AngleDistributionApp._style_hemisphere_axes(ax)
+
+    @staticmethod
+    def _style_hemisphere_axes(ax) -> None:
+        ax.set_box_aspect((1, 1, 0.75))
         ax.set_xlim(-1.05, 1.05)
         ax.set_ylim(-1.05, 1.05)
-        ax.set_zlim(-1.05, 1.05)
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        ax.set_zlabel("z")
+        ax.set_zlim(0.0, 1.05)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_zticks([])
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.set_zlabel("")
+        ax.grid(False)
+        try:
+            ax.set_proj_type("ortho")
+        except Exception:
+            pass
+        for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+            try:
+                axis.pane.fill = False
+                axis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.0))
+            except Exception:
+                pass
+            try:
+                axis.line.set_color((1.0, 1.0, 1.0, 0.0))
+            except Exception:
+                pass
 
     @staticmethod
     def _shortest_occupied_arc_coordinates(angle: np.ndarray) -> tuple[np.ndarray, float, float]:
@@ -3384,6 +3558,106 @@ class AngleDistributionApp:
         self._spherical_heatmap_fig.tight_layout()
         self._spherical_heatmap_canvas.draw_idle()
 
+    def _render_clean_phi_theta_tab(self) -> None:
+        if self._phi_theta_canvas is None:
+            return
+        self._ax_phi_theta_clean_phi.clear()
+        self._ax_phi_theta_clean_theta.clear()
+        self._ax_phi_theta_clean_hist.clear()
+
+        fit = self._current_unit_sphere_distribution()
+        if fit is None:
+            prompt = "Load data to plot phi(t) and theta(t)"
+            self._ax_phi_theta_clean_phi.set_title(r"$\phi(t)$")
+            self._ax_phi_theta_clean_theta.set_title(r"$\theta(t)$")
+            self._ax_phi_theta_clean_hist.set_title(r"$\theta$ distribution")
+            self._ax_phi_theta_clean_phi.text(0.5, 0.5, prompt, ha="center", va="center", transform=self._ax_phi_theta_clean_phi.transAxes)
+            self._ax_phi_theta_clean_theta.text(0.5, 0.5, prompt, ha="center", va="center", transform=self._ax_phi_theta_clean_theta.transAxes)
+            self._ax_phi_theta_clean_hist.text(0.5, 0.5, prompt, ha="center", va="center", transform=self._ax_phi_theta_clean_hist.transAxes)
+            self._phi_theta_fig.tight_layout()
+            self._phi_theta_canvas.draw_idle()
+            return
+
+        u = np.asarray(fit.get("u", np.zeros((0, 3), dtype=np.float64)), dtype=np.float64)
+        theta_rad = np.asarray(fit.get("theta_rad", np.zeros((0,), dtype=np.float64)), dtype=np.float64)
+        phi_unwrapped_rad = np.asarray(fit.get("phi_axis_unwrapped_rad", np.zeros((0,), dtype=np.float64)), dtype=np.float64)
+        n = min(int(u.shape[0]), int(theta_rad.size), int(phi_unwrapped_rad.size))
+        if n <= 0:
+            prompt = "No valid phi/theta points"
+            self._ax_phi_theta_clean_phi.set_title(r"$\phi(t)$")
+            self._ax_phi_theta_clean_theta.set_title(r"$\theta(t)$")
+            self._ax_phi_theta_clean_hist.set_title(r"$\theta$ distribution")
+            self._ax_phi_theta_clean_phi.text(0.5, 0.5, prompt, ha="center", va="center", transform=self._ax_phi_theta_clean_phi.transAxes)
+            self._ax_phi_theta_clean_theta.text(0.5, 0.5, prompt, ha="center", va="center", transform=self._ax_phi_theta_clean_theta.transAxes)
+            self._ax_phi_theta_clean_hist.text(0.5, 0.5, prompt, ha="center", va="center", transform=self._ax_phi_theta_clean_hist.transAxes)
+            self._phi_theta_fig.tight_layout()
+            self._phi_theta_canvas.draw_idle()
+            return
+
+        fs = max(1e-9, float(self._current_fps()))
+        t0_abs = float(max(0, int(self._sphere_fit_i0))) / fs
+        t = t0_abs + (np.arange(n, dtype=np.float64) / fs)
+        phi_unwrapped_deg = np.degrees(phi_unwrapped_rad[:n])
+        if phi_unwrapped_deg.size > 0:
+            phi_unwrapped_deg = phi_unwrapped_deg - float(phi_unwrapped_deg[0])
+        theta_deg = np.degrees(theta_rad[:n])
+
+        self._ax_phi_theta_clean_phi.plot(t, phi_unwrapped_deg, color="tab:blue", lw=1.0)
+        self._ax_phi_theta_clean_phi.set_xlim(float(t[0]), float(t[-1]) if n > 1 else float(t[0]) + 1.0 / fs)
+        self._ax_phi_theta_clean_phi.set_ylabel(r"$\phi$ (deg)")
+        self._ax_phi_theta_clean_phi.set_title(r"$\phi(t)$")
+        self._ax_phi_theta_clean_phi.grid(alpha=0.25)
+
+        self._ax_phi_theta_clean_theta.plot(t, theta_deg, color="tab:red", lw=1.0)
+        self._ax_phi_theta_clean_theta.set_xlim(float(t[0]), float(t[-1]) if n > 1 else float(t[0]) + 1.0 / fs)
+        self._ax_phi_theta_clean_theta.set_xlabel("time (s)")
+        self._ax_phi_theta_clean_theta.set_ylabel(r"$\theta$ (deg)")
+        self._ax_phi_theta_clean_theta.set_title(r"$\theta(t)$")
+        self._ax_phi_theta_clean_theta.grid(alpha=0.25)
+
+        theta_hist_deg = theta_deg[np.isfinite(theta_deg)]
+        theta_hist_deg = theta_hist_deg[(theta_hist_deg >= 0.0) & (theta_hist_deg <= 90.0)]
+        bin_w = self._parse_float(self._bin_deg_var.get())
+        if not (bin_w and bin_w > 0.0):
+            bin_w = 6.0
+        nbins = max(10, int(math.ceil(90.0 / float(bin_w))))
+        edges = np.linspace(0.0, 90.0, nbins + 1)
+        if theta_hist_deg.size > 0:
+            hist_vals, hist_edges, _hist_patches = self._ax_phi_theta_clean_hist.hist(
+                theta_hist_deg,
+                bins=edges,
+                density=True,
+                color="tab:blue",
+                alpha=0.35,
+                edgecolor="tab:blue",
+                linewidth=0.7,
+                label=r"Observed $\theta$ distribution",
+            )
+            peak_scale = float(np.pi / 180.0)
+            if peak_scale > 0.0:
+                for patch, h in zip(_hist_patches, hist_vals):
+                    patch.set_height(float(h) / peak_scale)
+        theta_grid_deg = np.linspace(0.0, 90.0, 600)
+        theta_pdf_deg = np.sin(np.radians(theta_grid_deg)) * (np.pi / 180.0)
+        peak_scale = float(np.max(theta_pdf_deg)) if theta_pdf_deg.size else 1.0
+        theta_pdf_rel = theta_pdf_deg / max(peak_scale, 1e-12)
+        self._ax_phi_theta_clean_hist.plot(
+            theta_grid_deg,
+            theta_pdf_rel,
+            color="tab:red",
+            lw=1.4,
+            label="Theoretical uniform occupancy of all orientations",
+        )
+        self._ax_phi_theta_clean_hist.set_xlim(0.0, 90.0)
+        self._ax_phi_theta_clean_hist.set_xlabel(r"$\theta$ (deg)")
+        self._ax_phi_theta_clean_hist.set_ylabel("relative density")
+        self._ax_phi_theta_clean_hist.set_title(r"$\theta$ distribution")
+        self._ax_phi_theta_clean_hist.grid(alpha=0.25)
+        self._ax_phi_theta_clean_hist.legend(loc="upper left", frameon=False)
+
+        self._phi_theta_fig.tight_layout()
+        self._phi_theta_canvas.draw_idle()
+
     def _render_sphere_tab(self) -> None:
         self._ax_sphere_3d.clear()
         if self._ax_sphere_heatmap is not None:
@@ -3399,13 +3673,14 @@ class AngleDistributionApp:
         self._phi_sel_line0_sphere = None
         self._phi_sel_line1_sphere = None
         self._phi_sel_span_sphere = None
+        self._render_clean_phi_theta_tab()
 
         fit = self._current_unit_sphere_distribution()
         if fit is None:
             prompt = "Load data to reconstruct unit-sphere trajectory"
-            self._ax_sphere_3d.set_title("Unit-sphere trajectory")
+            self._ax_sphere_3d.set_title("Hemisphere trajectory")
             if self._ax_sphere_heatmap is not None:
-                self._ax_sphere_heatmap.set_title("Unit-sphere occupancy heatmap")
+                self._ax_sphere_heatmap.set_title("Hemisphere occupancy")
                 self._ax_sphere_heatmap.text2D(
                     0.5,
                     0.5,
@@ -3431,7 +3706,7 @@ class AngleDistributionApp:
             self._ax_sphere_hist.text(
                 0.5, 0.5, prompt, ha="center", va="center", transform=self._ax_sphere_hist.transAxes
             )
-            self._sphere_info_var.set(f"{prompt} to reconstruct unit-sphere trajectory.")
+            self._sphere_info_var.set(f"{prompt} to reconstruct hemisphere trajectory.")
             self._sphere_fig.tight_layout()
             self._sphere_canvas.draw_idle()
             return
@@ -3444,22 +3719,10 @@ class AngleDistributionApp:
             return
 
         if str(fit.get("mode", "fitted")) == "raw":
-            uu = np.linspace(0.0, 2.0 * np.pi, 40)
-            vv = np.linspace(0.0, np.pi, 20)
-            xs = np.outer(np.cos(uu), np.sin(vv))
-            ys = np.outer(np.sin(uu), np.sin(vv))
-            zs = np.outer(np.ones_like(uu), np.cos(vv))
-            self._ax_sphere_3d.plot_wireframe(xs, ys, zs, color="0.82", linewidth=0.4, alpha=0.6)
+            self._draw_spherical_grid(self._ax_sphere_3d)
             self._sphere_trail_artist = self._ax_sphere_3d.scatter([], [], [], s=16, color="tab:blue", alpha=0.85)
             (self._sphere_head_artist,) = self._ax_sphere_3d.plot([], [], [], marker="o", markersize=5, color="black", linestyle="")
-            self._ax_sphere_3d.set_box_aspect((1, 1, 1))
-            self._ax_sphere_3d.set_xlim(-1.05, 1.05)
-            self._ax_sphere_3d.set_ylim(-1.05, 1.05)
-            self._ax_sphere_3d.set_zlim(-1.05, 1.05)
-            self._ax_sphere_3d.set_xlabel("x")
-            self._ax_sphere_3d.set_ylabel("y")
-            self._ax_sphere_3d.set_zlabel("z")
-            self._ax_sphere_3d.set_title("Raw Rod Path On Unit Sphere")
+            self._ax_sphere_3d.set_title("Raw Rod Path On Hemisphere")
 
             self._draw_unit_sphere_occupancy_heatmap(u)
 
@@ -3488,10 +3751,9 @@ class AngleDistributionApp:
                 n_full = int(np.asarray(self._spot_xy_series[idx], dtype=np.float64).shape[0])
                 if n_full > 0:
                     full_tmax = float(max(0, n_full - 1)) / fs
-            self._draw_sphere_phi_selection(full_tmax)
             self._ax_sphere_phi.set_xlabel("time (s)")
             self._ax_sphere_phi.set_ylabel("raw phi (deg, unwrapped)")
-            self._ax_sphere_phi.set_title("Raw phi(t) on unit sphere")
+            self._ax_sphere_phi.set_title("Raw phi(t) on hemisphere")
             self._ax_sphere_phi.grid(alpha=0.25)
 
             theta_deg = np.degrees(np.asarray(fit["theta_rad"], dtype=np.float64))
@@ -3538,12 +3800,7 @@ class AngleDistributionApp:
         hist_edges = np.asarray(fit["phi_axis_edges_deg"], dtype=np.float64)
 
         # Unit sphere + fitted small circle/axis.
-        uu = np.linspace(0.0, 2.0 * np.pi, 40)
-        vv = np.linspace(0.0, np.pi, 20)
-        xs = np.outer(np.cos(uu), np.sin(vv))
-        ys = np.outer(np.sin(uu), np.sin(vv))
-        zs = np.outer(np.ones_like(uu), np.cos(vv))
-        self._ax_sphere_3d.plot_wireframe(xs, ys, zs, color="0.82", linewidth=0.4, alpha=0.6)
+        self._draw_spherical_grid(self._ax_sphere_3d)
         self._ax_sphere_3d.plot(
             [-axis_k[0], axis_k[0]],
             [-axis_k[1], axis_k[1]],
@@ -3600,14 +3857,7 @@ class AngleDistributionApp:
             )
         self._sphere_trail_artist = self._ax_sphere_3d.scatter([], [], [], s=16, color="tab:blue", alpha=0.85)
         (self._sphere_head_artist,) = self._ax_sphere_3d.plot([], [], [], marker="o", markersize=5, color="black", linestyle="")
-        self._ax_sphere_3d.set_box_aspect((1, 1, 1))
-        self._ax_sphere_3d.set_xlim(-1.05, 1.05)
-        self._ax_sphere_3d.set_ylim(-1.05, 1.05)
-        self._ax_sphere_3d.set_zlim(-1.05, 1.05)
-        self._ax_sphere_3d.set_xlabel("x")
-        self._ax_sphere_3d.set_ylabel("y")
-        self._ax_sphere_3d.set_zlabel("z")
-        self._ax_sphere_3d.set_title("Rod Path On Unit Sphere")
+        self._ax_sphere_3d.set_title("Rod Path On Hemisphere")
         self._ax_sphere_3d.legend(loc="upper left", fontsize=8)
 
         self._draw_unit_sphere_occupancy_heatmap(u)
@@ -3653,7 +3903,6 @@ class AngleDistributionApp:
             n_full = int(np.asarray(self._spot_xy_series[idx], dtype=np.float64).shape[0])
             if n_full > 0:
                 full_tmax = float(max(0, n_full - 1)) / fs
-        self._draw_sphere_phi_selection(full_tmax)
         self._ax_sphere_phi.set_xlabel("time (s)")
         self._ax_sphere_phi.set_ylabel("phi_fromaxis (deg, unwrapped)")
         self._ax_sphere_phi.set_title("phi_fromaxis(t)")
