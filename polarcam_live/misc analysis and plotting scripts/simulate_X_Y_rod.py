@@ -19,6 +19,16 @@ class CurveResult:
     y: np.ndarray
 
 
+@dataclass
+class IntensityThetaResult:
+    theta_deg: np.ndarray
+    intensity_total: np.ndarray
+    intensity_i0: np.ndarray
+    intensity_i90: np.ndarray
+    intensity_i45: np.ndarray
+    intensity_i135: np.ndarray
+
+
 class RodDipoleSimulator:
     """
     Forward + data-fit simulator for a rotating rod dipole.
@@ -31,10 +41,16 @@ class RodDipoleSimulator:
         self.phi_deg = 0.0
 
         self.na = 1.40
-        self.n_medium = 1.518
+        self.n_medium = 1.33
 
         self.block_inner_na = False
         self.block_inner_fraction = 0.2
+
+        self.second_rod_enabled = False
+        self.join_frac_1 = 0.5
+        self.join_frac_2 = 0.5
+        self.second_rel_theta_deg = 45.0
+        self.second_rel_psi_deg = 0.0
 
         self.phi_samples = 361
         self.fit_phi_samples = 721
@@ -89,12 +105,17 @@ class RodDipoleSimulator:
         self.s_gamma = None
         self.s_phi = None
         self.s_na = None
+        self.s_join1 = None
+        self.s_join2 = None
+        self.s_second_theta = None
+        self.s_second_psi = None
 
         self.tb_cutout = None
         self.tb_fps = None
         self.tb_bin = None
 
         self.chk_block = None
+        self.chk_second = None
 
         self.btn_play_sim = None
         self.btn_recompute = None
@@ -172,6 +193,63 @@ class RodDipoleSimulator:
         norms = np.where(norms <= 0.0, 1.0, norms)
         return dirs / norms
 
+    @staticmethod
+    def _transported_perp_basis(u: np.ndarray, axis_hint: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Build a stable local basis perpendicular to direction u, using axis_hint when possible.
+        """
+        u = np.asarray(u, dtype=np.float64)
+        axis_hint = np.asarray(axis_hint, dtype=np.float64)
+        proj = axis_hint - (np.sum(u * axis_hint, axis=1, keepdims=True) * u)
+        proj_norm = np.linalg.norm(proj, axis=1, keepdims=True)
+        fallback = np.tile(np.array([[0.0, 0.0, 1.0]], dtype=np.float64), (u.shape[0], 1))
+        bad = (proj_norm[:, 0] <= 1e-12)
+        if np.any(bad):
+            alt = fallback[bad] - (np.sum(u[bad] * fallback[bad], axis=1, keepdims=True) * u[bad])
+            alt_norm = np.linalg.norm(alt, axis=1, keepdims=True)
+            very_bad = (alt_norm[:, 0] <= 1e-12)
+            if np.any(very_bad):
+                alt2_ref = np.tile(np.array([[1.0, 0.0, 0.0]], dtype=np.float64), (int(np.count_nonzero(very_bad)), 1))
+                alt[very_bad] = alt2_ref - (np.sum(u[bad][very_bad] * alt2_ref, axis=1, keepdims=True) * u[bad][very_bad])
+                alt_norm = np.linalg.norm(alt, axis=1, keepdims=True)
+            proj[bad] = alt
+            proj_norm = np.linalg.norm(proj, axis=1, keepdims=True)
+        v1 = proj / np.maximum(proj_norm, 1e-12)
+        v2 = np.cross(u, v1)
+        v2 = v2 / np.maximum(np.linalg.norm(v2, axis=1, keepdims=True), 1e-12)
+        return v1, v2
+
+    def _second_rod_directions(self, dirs1: np.ndarray, alpha_deg: float, beta_deg: float) -> np.ndarray:
+        axis = self._rotation_axis(alpha_deg, beta_deg)
+        v1, v2 = self._transported_perp_basis(dirs1, axis)
+        th = math.radians(float(self.second_rel_theta_deg))
+        ps = math.radians(float(self.second_rel_psi_deg))
+        cth, sth = math.cos(th), math.sin(th)
+        cps, sps = math.cos(ps), math.sin(ps)
+        dirs2 = (
+            (cth * dirs1)
+            + (sth * cps * v1)
+            + (sth * sps * v2)
+        )
+        dirs2 = dirs2 / np.maximum(np.linalg.norm(dirs2, axis=1, keepdims=True), 1e-12)
+        return dirs2
+
+    def _simulate_components_for_geometry(
+        self,
+        alpha_deg: float,
+        beta_deg: float,
+        gamma_deg: float,
+        phi_deg: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        phi_rad = np.deg2rad(np.asarray(phi_deg, dtype=np.float64))
+        dirs1 = self._rod_directions(alpha_deg, beta_deg, gamma_deg, phi_rad)
+        i0, i90, i45, i135 = self._simulate_components(dirs1)
+        if not bool(self.second_rod_enabled):
+            return i0, i90, i45, i135
+        dirs2 = self._second_rod_directions(dirs1, alpha_deg, beta_deg)
+        j0, j90, j45, j135 = self._simulate_components(dirs2)
+        return (i0 + j0, i90 + j90, i45 + j45, i135 + j135)
+
     def _build_collection_rays(self, exclude_inner: bool | None = None) -> None:
         if exclude_inner is None:
             exclude_inner = bool(self.block_inner_na)
@@ -235,9 +313,90 @@ class RodDipoleSimulator:
         i135 = intensity(135.0)
         return i0, i90, i45, i135
 
-    def _simulate_xy_for_params(self, alpha_deg: float, beta_deg: float, gamma_deg: float, phi_deg: np.ndarray) -> CurveResult:
-        dirs = self._rod_directions(alpha_deg, beta_deg, gamma_deg, np.deg2rad(phi_deg))
+    @staticmethod
+    def _total_output_intensity(
+        i0: np.ndarray,
+        i90: np.ndarray,
+        i45: np.ndarray,
+        i135: np.ndarray,
+    ) -> np.ndarray:
+        # Sum over complementary analyzer channels to estimate total collected output.
+        # The two pair-sums should agree up to numerical error; average them for robustness.
+        return 0.5 * ((i0 + i90) + (i45 + i135))
+
+    def _simulate_intensity_vs_theta(
+        self,
+        theta_deg: np.ndarray,
+        azimuth_deg: float = 0.0,
+    ) -> IntensityThetaResult:
+        th_deg = np.asarray(theta_deg, dtype=np.float64)
+        th_rad = np.radians(th_deg)
+        az = math.radians(float(azimuth_deg))
+        dirs = np.stack(
+            [
+                np.sin(th_rad) * math.cos(az),
+                np.sin(th_rad) * math.sin(az),
+                np.cos(th_rad),
+            ],
+            axis=1,
+        )
         i0, i90, i45, i135 = self._simulate_components(dirs)
+        itot = self._total_output_intensity(i0, i90, i45, i135)
+        return IntensityThetaResult(
+            theta_deg=th_deg,
+            intensity_total=itot,
+            intensity_i0=i0,
+            intensity_i90=i90,
+            intensity_i45=i45,
+            intensity_i135=i135,
+        )
+
+    def save_intensity_vs_theta_plot(self, out_path: Path) -> Path:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        theta_deg = np.linspace(0.0, 90.0, 181, dtype=np.float64)
+
+        self._build_collection_rays(exclude_inner=False)
+        no_block = self._simulate_intensity_vs_theta(theta_deg)
+
+        self._build_collection_rays(exclude_inner=self.block_inner_na)
+        with_block = self._simulate_intensity_vs_theta(theta_deg)
+
+        fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=140)
+        ax.plot(
+            no_block.theta_deg,
+            no_block.intensity_total,
+            color="0.45",
+            lw=1.8,
+            ls="--",
+            label="No inner block",
+        )
+        ax.plot(
+            with_block.theta_deg,
+            with_block.intensity_total,
+            color="tab:blue",
+            lw=2.2,
+            label="With inner block",
+        )
+        ax.set_xlim(0.0, 90.0)
+        ax.set_xlabel("Input theta (deg)")
+        ax.set_ylabel("Measured output intensity (a.u.)")
+        ax.set_title(
+            f"Output Intensity vs Input Theta  NA={self.na:.2f}, n={self.n_medium:.3f}, "
+            f"inner-block={'ON' if self.block_inner_na else 'OFF'}"
+        )
+        ax.grid(True, alpha=0.3)
+        ax.legend(frameon=False, fontsize=9)
+        fig.tight_layout()
+        fig.savefig(out_path)
+        plt.close(fig)
+
+        self._build_collection_rays(exclude_inner=self.block_inner_na)
+        return out_path
+
+    def _simulate_xy_for_params(self, alpha_deg: float, beta_deg: float, gamma_deg: float, phi_deg: np.ndarray) -> CurveResult:
+        i0, i90, i45, i135 = self._simulate_components_for_geometry(alpha_deg, beta_deg, gamma_deg, phi_deg)
         eps = 1e-15
         x = (i0 - i90) / (i0 + i90 + eps)
         y = (i45 - i135) / (i45 + i135 + eps)
@@ -570,6 +729,16 @@ class RodDipoleSimulator:
         self.gamma_deg = float(self.s_gamma.val)
         self.phi_deg = float(self.s_phi.val)
         self.na = float(self.s_na.val)
+        if self.s_join1 is not None:
+            self.join_frac_1 = float(self.s_join1.val)
+        if self.s_join2 is not None:
+            self.join_frac_2 = float(self.s_join2.val)
+        if self.s_second_theta is not None:
+            self.second_rel_theta_deg = float(self.s_second_theta.val)
+        if self.s_second_psi is not None:
+            self.second_rel_psi_deg = float(self.s_second_psi.val)
+        if self.chk_second is not None:
+            self.second_rod_enabled = bool(self.chk_second.get_status()[0])
         self.na = max(0.01, min(self.na, self.n_medium - 1e-6))
 
     def _get_bin_deg(self) -> float:
@@ -601,6 +770,12 @@ class RodDipoleSimulator:
     def _on_toggle_block(self, _label: str) -> None:
         if self.chk_block is not None:
             self.block_inner_na = bool(self.chk_block.get_status()[0])
+        self._read_controls()
+        self._recompute_all()
+
+    def _on_toggle_second_rod(self, _label: str) -> None:
+        if self.chk_second is not None:
+            self.second_rod_enabled = bool(self.chk_second.get_status()[0])
         self._read_controls()
         self._recompute_all()
 
@@ -720,6 +895,15 @@ class RodDipoleSimulator:
         self.ax3d.plot(cone[:, 0], cone[:, 1], cone[:, 2], color="tab:orange", lw=1.5)
         self.ax3d.plot([0.0, u[0]], [0.0, u[1]], [0.0, u[2]], color="tab:blue", lw=3)
         self.ax3d.scatter([u[0]], [u[1]], [u[2]], color="tab:blue", s=36)
+        if self.second_rod_enabled:
+            u2 = self._second_rod_directions(u[None, :], alpha_deg, beta_deg)[0]
+            join = (float(self.join_frac_1) - 0.5) * u
+            center2 = join - ((float(self.join_frac_2) - 0.5) * u2)
+            p2a = center2 - (0.5 * u2)
+            p2b = center2 + (0.5 * u2)
+            self.ax3d.plot([join[0]], [join[1]], [join[2]], marker="o", color="tab:green", ms=6)
+            self.ax3d.plot([p2a[0], p2b[0]], [p2a[1], p2b[1]], [p2a[2], p2b[2]], color="tab:green", lw=3)
+            self.ax3d.scatter([p2b[0]], [p2b[1]], [p2b[2]], color="tab:green", s=34)
 
         self.ax3d.set_title("Rod / Cone Geometry")
         self.ax3d.set_xlabel("x")
@@ -801,7 +985,8 @@ class RodDipoleSimulator:
         self.ax_phi.set_xlabel("phi (deg)")
         self.ax_phi.set_ylabel("value")
         self.ax_phi.set_title(
-            f"Simulation: NA={self.na:.2f}, n={self.n_medium:.3f}, alpha={self.alpha_deg:.1f}, beta={self.beta_deg:.1f}, gamma={self.gamma_deg:.1f}, inner-block={'ON' if self.block_inner_na else 'OFF'}"
+            f"Simulation: NA={self.na:.2f}, n={self.n_medium:.3f}, alpha={self.alpha_deg:.1f}, beta={self.beta_deg:.1f}, gamma={self.gamma_deg:.1f}, "
+            f"inner-block={'ON' if self.block_inner_na else 'OFF'}, second-rod={'ON' if self.second_rod_enabled else 'OFF'}"
         )
         self.ax_phi.grid(alpha=0.25)
         self.ax_phi.legend(loc="best", fontsize=8)
@@ -933,18 +1118,30 @@ class RodDipoleSimulator:
         ax_gamma = self.fig.add_axes([0.08, 0.11, 0.32, 0.03])
         ax_phi = self.fig.add_axes([0.50, 0.19, 0.32, 0.03])
         ax_na = self.fig.add_axes([0.50, 0.15, 0.32, 0.03])
+        ax_join1 = self.fig.add_axes([0.08, 0.01, 0.18, 0.03])
+        ax_join2 = self.fig.add_axes([0.29, 0.01, 0.18, 0.03])
+        ax_second_theta = self.fig.add_axes([0.50, 0.01, 0.18, 0.03])
+        ax_second_psi = self.fig.add_axes([0.71, 0.01, 0.18, 0.03])
 
         self.s_alpha = Slider(ax_alpha, "alpha (deg)", 0.0, 90.0, valinit=self.alpha_deg, valstep=0.1)
         self.s_beta = Slider(ax_beta, "beta (deg)", 0.0, 360.0, valinit=self.beta_deg, valstep=0.1)
         self.s_gamma = Slider(ax_gamma, "gamma (deg)", 0.0, 89.0, valinit=self.gamma_deg, valstep=0.1)
         self.s_phi = Slider(ax_phi, "phi (deg)", 0.0, 360.0, valinit=self.phi_deg, valstep=0.1)
         self.s_na = Slider(ax_na, "NA", 0.05, self.n_medium - 0.001, valinit=self.na, valstep=0.001)
+        self.s_join1 = Slider(ax_join1, "join rod1", 0.0, 1.0, valinit=self.join_frac_1, valstep=0.01)
+        self.s_join2 = Slider(ax_join2, "join rod2", 0.0, 1.0, valinit=self.join_frac_2, valstep=0.01)
+        self.s_second_theta = Slider(ax_second_theta, "rod2 theta", 0.0, 180.0, valinit=self.second_rel_theta_deg, valstep=0.1)
+        self.s_second_psi = Slider(ax_second_psi, "rod2 psi", 0.0, 360.0, valinit=self.second_rel_psi_deg, valstep=0.1)
 
         self.s_alpha.on_changed(self._on_geometry_slider)
         self.s_beta.on_changed(self._on_geometry_slider)
         self.s_gamma.on_changed(self._on_geometry_slider)
         self.s_na.on_changed(self._on_geometry_slider)
         self.s_phi.on_changed(self._on_phi_slider)
+        self.s_join1.on_changed(self._on_geometry_slider)
+        self.s_join2.on_changed(self._on_geometry_slider)
+        self.s_second_theta.on_changed(self._on_geometry_slider)
+        self.s_second_psi.on_changed(self._on_geometry_slider)
 
         ax_play_sim = self.fig.add_axes([0.50, 0.10, 0.10, 0.04])
         ax_recompute = self.fig.add_axes([0.62, 0.10, 0.13, 0.04])
@@ -967,17 +1164,20 @@ class RodDipoleSimulator:
         self.btn_tab_sim.on_clicked(self._on_tab_sim)
         self.btn_tab_data.on_clicked(self._on_tab_data)
 
-        ax_block = self.fig.add_axes([0.08, 0.05, 0.28, 0.07])
+        ax_block = self.fig.add_axes([0.08, 0.05, 0.16, 0.07])
+        ax_second = self.fig.add_axes([0.25, 0.05, 0.16, 0.07])
         ax_cut = self.fig.add_axes([0.37, 0.05, 0.10, 0.04])
         ax_fps = self.fig.add_axes([0.86, 0.05, 0.06, 0.04])
         ax_bin = self.fig.add_axes([0.93, 0.05, 0.05, 0.04])
 
         self.chk_block = CheckButtons(ax_block, ["Block inner pupil"], [self.block_inner_na])
+        self.chk_second = CheckButtons(ax_second, ["Second rod"], [self.second_rod_enabled])
         self.tb_cutout = TextBox(ax_cut, "cutout", initial=f"{self.block_inner_fraction:.3f}")
         self.tb_fps = TextBox(ax_fps, "fps", initial=f"{self.data_fps:.1f}")
         self.tb_bin = TextBox(ax_bin, "bin", initial="9")
 
         self.chk_block.on_clicked(self._on_toggle_block)
+        self.chk_second.on_clicked(self._on_toggle_second_rod)
         self.tb_cutout.on_submit(self._on_cutout_submit)
         self.tb_fps.on_submit(self._on_fps_submit)
         self.tb_bin.on_submit(self._on_bin_submit)

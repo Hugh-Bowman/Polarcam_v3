@@ -15,7 +15,10 @@ import numpy as np
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QApplication
 
-from polarcam.backend.ids_backend import IDSCamera
+try:
+    from backend.ids_backend import IDSCamera
+except ModuleNotFoundError:
+    from polarcam.backend.ids_backend import IDSCamera
 
 log = logging.getLogger(__name__)
 

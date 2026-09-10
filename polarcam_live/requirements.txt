@@ -1,0 +1,29 @@
+# Runtime dependencies inferred from Polarcam source files.
+#
+# Project-local modules are intentionally not listed here:
+# Detection_alg_offline, detect_spinners, pol_reconstruction, Controlling,
+# backend, background_ml_recon, and other same-folder scripts.
+#
+# Optional external source-only imports seen in analysis scripts:
+# saicinpainting, net, and opt. Install those from their original source
+# repositories if you use the pretrained inpainting benchmark paths.
+
+ids-peak==1.15.0.0.8
+ids-peak-common==1.3.0.4212
+ids-peak-ipl==1.17.2.0.7
+imageio==2.37.3
+matplotlib==3.10.9
+npTDMS==1.11.0
+numpy==2.4.4
+omegaconf==2.3.0
+opencv-python==4.13.0.92
+pandas==3.0.3
+pillow==12.2.0
+PySide6==6.11.0
+PyYAML==6.0.3
+scikit-image==0.26.0
+scikit-learn==1.8.0
+scipy==1.17.1
+torch==2.11.0
+torchvision==0.26.0
+tqdm==4.67.3

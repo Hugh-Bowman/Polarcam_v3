@@ -362,7 +362,7 @@ class BasicVideoPlayer:
         },
     }
     STATIONARY_DATASET_DIRNAME = "stationary rods 25nm 02072026"
-    CAPTURE_DEFAULT_SAVE_DIRNAME = "attempt240nmsoundonbuffer"
+    CAPTURE_DEFAULT_SAVE_DIRNAME = str(Path("datasets") / "attempt240nmsoundonbuffer")
     STATIONARY_DATASET_PENDING_DIR = "pending"
     STATIONARY_DATASET_GOOD_DIR = "good"
     STATIONARY_DATASET_BAD_DIR = "bad"
@@ -371,7 +371,11 @@ class BasicVideoPlayer:
     RECORDINGS_SPOT_DIRNAME = "spots"
     RECORDINGS_FOF1_DIRNAME = "fof1"
     INFILL_TRAINING_STACKS_DIR = (
-        Path("gpt prompted exploration") / "Background ml recon" / "data" / "coverslip_stacks"
+        Path("misc analysis and plotting scripts")
+        / "gpt prompted exploration"
+        / "Background ml recon"
+        / "data"
+        / "coverslip_stacks"
     )
 
     def _show_error(self, title: str, message: str) -> None:

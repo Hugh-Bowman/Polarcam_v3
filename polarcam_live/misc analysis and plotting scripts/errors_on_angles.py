@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -20,12 +20,34 @@ except Exception:
     least_squares = None
 
 
-# User-specified hole+fresnel conversion:
-# theta(r) = asin(sqrt((0.1866*r)/(0.5577 - 0.4216*r))), valid for 0 <= r < 0.9170
-THETA_A = 0.1866
-THETA_B = 0.5577
-THETA_C = 0.4216
-THETA_R_MAX = 0.9170
+# Finite-NA central-cutout theta(r) reconstruction parameters from
+# dipole_finite_na_cutout.py for NA_out=1.3 and central-hole NA=0.39.
+THETA_RECON_LUT_STEP_DEG = 0.1
+THETA_RECON_MODELS = {
+    "water": {
+        "label": "water finite-NA",
+        "n_medium": 1.333,
+        "na_out": 1.3,
+        "na_hole": 0.39,
+        "J1": 0.8151146019095186,
+        "J2": 0.07979900400468018,
+        "J3": 0.12805600171572504,
+        "r_max": 0.8216609883293448,
+    },
+    "glycerol50": {
+        "label": "50% glycerol finite-NA",
+        "n_medium": 1.398,
+        "na_out": 1.3,
+        "na_hole": 0.39,
+        "J1": 0.7051533822554514,
+        "J2": 0.049316635956229066,
+        "J3": 0.11661874844458937,
+        "r_max": 0.869268135868078,
+    },
+}
+THETA_RECON_DEFAULT_KEY = "water"
+_THETA_RECON_ACTIVE_KEY = THETA_RECON_DEFAULT_KEY
+_THETA_RECON_LUT_CACHE: dict[str, dict[str, np.ndarray | float]] = {}
 THETA_THEORY_PLOT_MAX_DEG = 89.9
 DATA_THETA_MIN_DEG = 10.0
 DATA_THETA_MAX_DEG = 80.0
@@ -38,6 +60,31 @@ LOW_THETA_WEIGHT_FACTOR = 3.0
 FORCE_BEST_FIXED_FIT = True
 FORCE_SIGMA_LIGHT = 0.01226
 FORCE_SIGMA_SOURCE_XY = 0.01358
+STATIONARY_DATASET_DIRNAME = "stationary_rod_dataset_01062026"
+LEGACY_STATIONARY_DATASET_DIRNAME = "stationary_rod_dataset"
+PRECISION_VS_EXPOSURE_40NM_DIRNAME = "40nm precision vs exposure"
+
+
+def constrained_fit_specs() -> list[tuple[str, dict[str, bool]]]:
+    return [
+        ("combined", {"zero_b": False, "zero_sigma_bg": False, "zero_i0": False}),
+        ("b0", {"zero_b": True, "zero_sigma_bg": False, "zero_i0": False}),
+        ("sigma_bg0", {"zero_b": False, "zero_sigma_bg": True, "zero_i0": False}),
+        ("i00", {"zero_b": False, "zero_sigma_bg": False, "zero_i0": True}),
+        ("b0_sigma_bg0", {"zero_b": True, "zero_sigma_bg": True, "zero_i0": False}),
+        ("b0_i00", {"zero_b": True, "zero_sigma_bg": False, "zero_i0": True}),
+        ("sigma_bg0_i00", {"zero_b": False, "zero_sigma_bg": True, "zero_i0": True}),
+        ("b0_sigma_bg0_i00", {"zero_b": True, "zero_sigma_bg": True, "zero_i0": True}),
+    ]
+
+
+def constrained_fit_specs_irod() -> list[tuple[str, dict[str, bool]]]:
+    return [
+        ("combined", {"zero_b": False, "zero_sigma_bg": False}),
+        ("b0", {"zero_b": True, "zero_sigma_bg": False}),
+        ("sigma_bg0", {"zero_b": False, "zero_sigma_bg": True}),
+        ("b0_sigma_bg0", {"zero_b": True, "zero_sigma_bg": True}),
+    ]
 
 
 @dataclass
@@ -52,6 +99,10 @@ class RodResult:
     r_mean: float
     xy_var_score: float
     brightness_mean: float
+    brightness_peak2x2_mean: float
+    brightness_p99: float
+    brightness_p98: float
+    has_pixel_255: bool
     brightness_abs_norm: float
     npy_path: str
 
@@ -77,7 +128,9 @@ class ModeFit:
     a_param: float
     b_param: float
     sigma_bg: float
+    i0_intensity: float
     k_intensity: float
+    n_like: float
     n_used: int
 
 
@@ -87,6 +140,22 @@ class IntensityThetaFit:
     k_77: float
     i_const_11: float
     k_11: float
+    n_used: int
+
+
+@dataclass
+class IntensitySin2Fit:
+    k_77: float
+    k_15: float
+    n_used: int
+
+
+@dataclass
+class IntensityProjectedSpreadFit:
+    k_77: float
+    q_77: float
+    k_15: float
+    q_15: float
     n_used: int
 
 
@@ -119,79 +188,123 @@ class SharedNoiseTwoKFit:
     n_used: int
 
 
-def theta_hole_fresnel_from_r(r: np.ndarray) -> np.ndarray:
+@dataclass
+class IrodFit:
+    fit_name: str
+    a_param: float
+    b_param: float
+    sigma_bg: float
+    n_like: float
+    n_used: int
+
+
+def _theta_recon_active_key() -> str:
+    key = str(_THETA_RECON_ACTIVE_KEY or THETA_RECON_DEFAULT_KEY).strip().lower()
+    if key not in THETA_RECON_MODELS:
+        return THETA_RECON_DEFAULT_KEY
+    return key
+
+
+def _theta_recon_params(key: str | None = None) -> dict:
+    use_key = str(key or _theta_recon_active_key()).strip().lower()
+    return dict(THETA_RECON_MODELS.get(use_key, THETA_RECON_MODELS[THETA_RECON_DEFAULT_KEY]))
+
+
+def _theta_recon_lut(key: str | None = None) -> dict[str, np.ndarray | float]:
+    use_key = str(key or _theta_recon_active_key()).strip().lower()
+    cached = _THETA_RECON_LUT_CACHE.get(use_key)
+    if cached is not None:
+        return cached
+    params = _theta_recon_params(use_key)
+    j1 = float(params["J1"])
+    j2 = float(params["J2"])
+    j3 = float(params["J3"])
+    a = j1 - j2
+    b = j1 + j2
+    r_max = float(params["r_max"])
+    theta_deg = np.arange(0.0, 90.0, max(0.01, float(THETA_RECON_LUT_STEP_DEG)), dtype=np.float64)
+    theta_deg = np.append(theta_deg, 90.0)
+    theta_rad = np.radians(theta_deg)
+    tan2 = np.tan(theta_rad) ** 2
+    r_vals = np.full(theta_rad.shape, np.nan, dtype=np.float64)
+    finite = np.isfinite(tan2)
+    den = (2.0 * j3) + (b * tan2[finite])
+    ok = np.isfinite(den) & (den > 0.0)
+    r_tmp = np.full(den.shape, np.nan, dtype=np.float64)
+    r_tmp[ok] = (a * tan2[finite][ok]) / den[ok]
+    r_vals[np.where(finite)[0]] = r_tmp
+    if r_vals.size > 0:
+        r_vals[0] = 0.0
+        r_vals[-1] = r_max
+    lut = {
+        "theta_deg": theta_deg,
+        "theta_rad": theta_rad,
+        "r": r_vals,
+        "A": a,
+        "B": b,
+        "J3": j3,
+        "r_max": r_max,
+    }
+    _THETA_RECON_LUT_CACHE[use_key] = lut
+    return lut
+
+
+def theta_hole_fresnel_from_r(r: np.ndarray, model_key: str | None = None) -> np.ndarray:
     r = np.asarray(r, dtype=np.float64)
     out = np.full(r.shape, np.nan, dtype=np.float64)
+    lut = _theta_recon_lut(model_key)
+    r_vals = np.asarray(lut["r"], dtype=np.float64)
+    theta_rad = np.asarray(lut["theta_rad"], dtype=np.float64)
+    r_max = float(lut["r_max"])
     finite = np.isfinite(r)
-    sat = finite & (r >= THETA_R_MAX)
+    if not np.any(finite):
+        return out
+    sat = finite & (r >= r_max)
     if np.any(sat):
         out[sat] = 0.5 * np.pi
-
-    valid = finite & (r >= 0.0) & (r < THETA_R_MAX)
-    if not np.any(valid):
-        return out
-
-    rv = r[valid]
-    den = THETA_B - (THETA_C * rv)
-    ok = den > 0.0
-    if not np.any(ok):
-        return out
-
-    ratio = np.full(rv.shape, np.nan, dtype=np.float64)
-    ratio[ok] = (THETA_A * rv[ok]) / den[ok]
-    ok2 = np.isfinite(ratio) & (ratio >= 0.0) & (ratio <= 1.0)
-    if np.any(ok2):
-        theta = np.arcsin(np.sqrt(ratio[ok2]))
-        rv_out = np.full(rv.shape, np.nan, dtype=np.float64)
-        rv_out[ok2] = theta
-        out_idx = np.where(valid)[0]
-        out[out_idx] = rv_out
+    valid = finite & (r >= 0.0) & (r < r_max)
+    if np.any(valid):
+        out[valid] = np.interp(r[valid], r_vals, theta_rad, left=0.0, right=0.5 * np.pi)
     return out
 
 
-def dtheta_dr_hole_fresnel(r: np.ndarray) -> np.ndarray:
-    """
-    d/dr of theta(r) with theta=asin(sqrt(q)), q=a*r/(b-c*r)
-    dtheta/dr = (dq/dr) / (2*sqrt(q)*sqrt(1-q)) with dq/dr = a*b/(b-c*r)^2
-    """
+def dtheta_dr_hole_fresnel(r: np.ndarray, model_key: str | None = None) -> np.ndarray:
     r = np.asarray(r, dtype=np.float64)
     out = np.full(r.shape, np.nan, dtype=np.float64)
-
-    den = THETA_B - (THETA_C * r)
-    valid = np.isfinite(r) & np.isfinite(den) & (den > 0.0)
+    lut = _theta_recon_lut(model_key)
+    a = float(lut["A"])
+    b = float(lut["B"])
+    j3 = float(lut["J3"])
+    r_max = float(lut["r_max"])
+    den = a - (b * r)
+    valid = np.isfinite(r) & (r > 0.0) & (r < r_max) & np.isfinite(den) & (den > 0.0)
     if not np.any(valid):
         return out
-
     rv = r[valid]
-    denv = den[valid]
-    q = (THETA_A * rv) / denv
-    dq = (THETA_A * THETA_B) / (denv * denv)
-
-    ok = np.isfinite(q) & (q > 0.0) & (q < 1.0) & np.isfinite(dq)
-    if not np.any(ok):
-        return out
-
+    denv = a - (b * rv)
+    t = (2.0 * j3 * rv) / denv
+    dt = (2.0 * j3 * a) / (denv * denv)
+    ok = np.isfinite(t) & (t > 0.0) & np.isfinite(dt)
     deriv = np.full(rv.shape, np.nan, dtype=np.float64)
-    deriv[ok] = dq[ok] / (2.0 * np.sqrt(q[ok]) * np.sqrt(1.0 - q[ok]))
-
-    idx = np.where(valid)[0]
-    out[idx] = deriv
+    deriv[ok] = dt[ok] / (2.0 * np.sqrt(t[ok]) * (1.0 + t[ok]))
+    out[np.where(valid)[0]] = deriv
     return out
 
 
-def r_from_theta_hole_fresnel(theta_rad: np.ndarray) -> np.ndarray:
-    """
-    Inverse of theta(r) model:
-      q = sin(theta)^2
-      q = a*r/(b-c*r)  =>  r = b*q / (a + c*q)
-    """
+def r_from_theta_hole_fresnel(theta_rad: np.ndarray, model_key: str | None = None) -> np.ndarray:
     th = np.asarray(theta_rad, dtype=np.float64)
-    q = np.sin(th) ** 2
-    den = THETA_A + (THETA_C * q)
+    lut = _theta_recon_lut(model_key)
+    a = float(lut["A"])
+    b = float(lut["B"])
+    j3 = float(lut["J3"])
+    t = np.tan(th) ** 2
+    den = (2.0 * j3) + (b * t)
     out = np.full(th.shape, np.nan, dtype=np.float64)
-    ok = np.isfinite(q) & np.isfinite(den) & (den > 0.0)
+    ok = np.isfinite(t) & np.isfinite(den) & (den > 0.0)
     if np.any(ok):
-        out[ok] = (THETA_B * q[ok]) / den[ok]
+        out[ok] = (a * t[ok]) / den[ok]
+    r_max = float(lut["r_max"])
+    out = np.where(np.isfinite(out), np.clip(out, 0.0, r_max), out)
     return out
 
 
@@ -239,18 +352,228 @@ def load_json(path: Path) -> Optional[dict]:
 
 
 def roi_pixels_for_mode(mode: str) -> float:
-    # maxfps mode uses 11x11 capture ROI; 77fps mode uses 15x15 capture ROI.
-    if mode == "maxfps_11x11":
-        return float(11 * 11)
+    # Current stationary-rod datasets use 15x15 ROI for both 77fps and maxfps modes.
+    if mode == "maxfps_15x15":
+        return float(15 * 15)
     if mode == "77fps":
         return float(15 * 15)
-    return float(11 * 11)
+    return float(15 * 15)
 
 
 def mode_meta_path(rod_dir: Path, mode: str) -> Path:
     if mode == "77fps":
         return rod_dir / "capture_77fps_meta.json"
-    return rod_dir / "capture_maxfps_11x11_meta.json"
+    return rod_dir / "capture_maxfps_15x15_meta.json"
+
+
+def _xy_phi_from_channel_windows(
+    a0: np.ndarray,
+    a45: np.ndarray,
+    a135: np.ndarray,
+    a90: np.ndarray,
+) -> tuple[float, float, float]:
+    eps = 1e-6
+    if (
+        a0.size <= 0
+        or a45.size <= 0
+        or a135.size <= 0
+        or a90.size <= 0
+    ):
+        return (0.0, 0.0, 0.0)
+    h = min(int(a0.shape[0]), int(a45.shape[0]), int(a135.shape[0]), int(a90.shape[0]))
+    w = min(int(a0.shape[1]), int(a45.shape[1]), int(a135.shape[1]), int(a90.shape[1]))
+    if h <= 0 or w <= 0:
+        return (0.0, 0.0, 0.0)
+    a0 = np.asarray(a0[:h, :w], dtype=np.float32)
+    a45 = np.asarray(a45[:h, :w], dtype=np.float32)
+    a135 = np.asarray(a135[:h, :w], dtype=np.float32)
+    a90 = np.asarray(a90[:h, :w], dtype=np.float32)
+    finite = np.isfinite(a0) & np.isfinite(a45) & np.isfinite(a135) & np.isfinite(a90)
+    if not np.any(finite):
+        return (0.0, 0.0, 0.0)
+    m0 = float(np.mean(a0[finite]))
+    m90 = float(np.mean(a90[finite]))
+    m45 = float(np.mean(a45[finite]))
+    m135 = float(np.mean(a135[finite]))
+    x = (m0 - m90) / (m0 + m90 + eps)
+    y = (m45 - m135) / (m45 + m135 + eps)
+    phi = float(0.5 * np.arctan2(y, x))
+    return (float(x), float(y), phi)
+
+
+def _xy_phi_from_frame_fullroi(
+    gray: np.ndarray,
+    roi_meta: Optional[dict],
+    win_raw: int | None = None,
+) -> tuple[float, float, float]:
+    if gray.ndim != 2:
+        g = np.asarray(gray[..., 0])
+    else:
+        g = np.asarray(gray)
+
+    px = 0
+    py = 0
+    if roi_meta is not None:
+        try:
+            px = int(roi_meta.get("phase_x", int(roi_meta.get("x", 0)) % 2)) % 2
+            py = int(roi_meta.get("phase_y", int(roi_meta.get("y", 0)) % 2)) % 2
+        except Exception:
+            px = 0
+            py = 0
+
+    gf = np.asarray(g, dtype=np.float32)
+    I90 = gf[py::2, px::2]
+    I45 = gf[py::2, (1 - px) :: 2]
+    I135 = gf[(1 - py) :: 2, px::2]
+    I0 = gf[(1 - py) :: 2, (1 - px) :: 2]
+    return _xy_phi_from_channel_windows(a0=I0, a45=I45, a135=I135, a90=I90)
+
+
+def _xy_phi_from_frame_gui_path(
+    gray: np.ndarray,
+    roi_meta: Optional[dict],
+    win_raw: int | None = None,
+) -> tuple[float, float, float]:
+    if gray.ndim != 2:
+        g = np.asarray(gray[..., 0])
+    else:
+        g = np.asarray(gray)
+    gh, gw = int(g.shape[0]), int(g.shape[1])
+    if gh <= 0 or gw <= 0:
+        return (0.0, 0.0, 0.0)
+
+    if win_raw is None:
+        try:
+            win_raw = int((roi_meta or {}).get("win_raw", (roi_meta or {}).get("w", gw)))
+        except Exception:
+            win_raw = gw
+    win_raw = max(2, int(win_raw))
+    if (win_raw % 2) != 0:
+        win_raw -= 1
+
+    cx = (gw - 1) / 2.0
+    cy = (gh - 1) / 2.0
+    if roi_meta is not None:
+        try:
+            cx = float(roi_meta["cx"]) - float(roi_meta["x"])
+            cy = float(roi_meta["cy"]) - float(roi_meta["y"])
+        except Exception:
+            pass
+
+    x0 = int(round(cx)) - (win_raw // 2)
+    y0 = int(round(cy)) - (win_raw // 2)
+    x1 = x0 + win_raw
+    y1 = y0 + win_raw
+    x0 = max(0, x0)
+    y0 = max(0, y0)
+    x1 = min(gw, x1)
+    y1 = min(gh, y1)
+    raw_win = np.asarray(g[y0:y1, x0:x1], dtype=np.float32)
+    if raw_win.ndim != 2 or raw_win.shape[0] < 2 or raw_win.shape[1] < 2:
+        return (0.0, 0.0, 0.0)
+
+    px = int(x0) % 2
+    py = int(y0) % 2
+    I90 = raw_win[py::2, px::2]
+    I45 = raw_win[py::2, (1 - px) :: 2]
+    I135 = raw_win[(1 - py) :: 2, px::2]
+    I0 = raw_win[(1 - py) :: 2, (1 - px) :: 2]
+    return _xy_phi_from_channel_windows(a0=I0, a45=I45, a135=I135, a90=I90)
+
+
+def _recompute_xy_series_from_stack(
+    arr_stack: np.ndarray,
+    roi_meta: dict,
+) -> tuple[list[tuple[float, float]], list[float], np.ndarray]:
+    xy_series: list[tuple[float, float]] = []
+    phi_series: list[float] = []
+    included_values: list[np.ndarray] = []
+    if arr_stack is None or getattr(arr_stack, "ndim", 0) < 3:
+        return (xy_series, phi_series, np.asarray([], dtype=np.float64))
+
+    total = int(arr_stack.shape[0])
+    try:
+        win_raw = int(roi_meta.get("win_raw", roi_meta.get("w", arr_stack.shape[2])))
+    except Exception:
+        win_raw = int(arr_stack.shape[2]) if getattr(arr_stack, "ndim", 0) >= 3 else 0
+    for i in range(total):
+        frame = np.asarray(arr_stack[i])
+        try:
+            xv, yv, phi = _xy_phi_from_frame_gui_path(frame, roi_meta=roi_meta, win_raw=win_raw)
+        except Exception:
+            continue
+        xy_series.append((float(xv), float(yv)))
+        phi_series.append(float(phi))
+        try:
+            vals = np.asarray(frame, dtype=np.float64).reshape(-1)
+            if vals.size > 0:
+                included_values.append(vals)
+        except Exception:
+            pass
+
+    if included_values:
+        included_concat = np.concatenate(included_values, axis=0)
+    else:
+        included_concat = np.asarray([], dtype=np.float64)
+    return (xy_series, phi_series, included_concat)
+
+
+def _unpack_padded_mono12_rows(arr_stack: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr_stack)
+    if arr.ndim != 3 or arr.shape[1] != 14 or arr.shape[2] != 256:
+        return arr
+    useful_bytes = 21  # 14 pixels * 12 bits / 8
+    n_frames = int(arr.shape[0])
+    out = np.zeros((n_frames, 14, 14), dtype=np.uint16)
+    for fi in range(n_frames):
+        frame = arr[fi]
+        for y in range(14):
+            row = frame[y, :useful_bytes].astype(np.uint16, copy=False)
+            vals_u12: list[int] = []
+            for i in range(0, useful_bytes, 3):
+                b0 = int(row[i])
+                b1 = int(row[i + 1])
+                b2 = int(row[i + 2])
+                p0 = ((b0 << 4) | (b1 & 0x0F)) & 0x0FFF
+                p1 = ((b2 << 4) | (b1 >> 4)) & 0x0FFF
+                vals_u12.append(p0)
+                vals_u12.append(p1)
+            out[fi, y, :] = np.asarray(vals_u12[:14], dtype=np.uint16)
+    return out
+
+
+def _strip_phase_marker_frame(arr: np.ndarray, roi_meta: Optional[dict] = None) -> np.ndarray:
+    a = np.asarray(arr)
+    if getattr(a, "ndim", 0) < 3 or int(a.shape[0]) < 2:
+        return a
+    marker = np.asarray(a[-1])
+    if getattr(marker, "ndim", 0) != 2:
+        return a
+    nz = np.argwhere(marker != 0)
+    if nz.shape[0] != 1:
+        return a
+    my, mx = int(nz[0][0]), int(nz[0][1])
+    try:
+        if float(marker[my, mx]) != 1.0:
+            return a
+        if float(np.sum(marker, dtype=np.float64)) != 1.0:
+            return a
+    except Exception:
+        return a
+    if roi_meta is not None:
+        try:
+            roi_meta["phase_x"] = int(mx) % 2
+            roi_meta["phase_y"] = int(my) % 2
+        except Exception:
+            pass
+    return np.asarray(a[:-1])
+
+
+def _load_stack_for_analysis(npy_path: Path, roi_meta: Optional[dict] = None) -> np.ndarray:
+    arr = np.load(npy_path, allow_pickle=False)
+    arr = _unpack_padded_mono12_rows(arr)
+    arr = _strip_phase_marker_frame(arr, roi_meta=roi_meta)
+    return np.asarray(arr)
 
 
 def analyze_mode(rod_dir: Path, mode: str, min_frames: int) -> Optional[RodResult]:
@@ -262,17 +585,90 @@ def analyze_mode(rod_dir: Path, mode: str, min_frames: int) -> Optional[RodResul
     if not isinstance(xy_raw, list):
         return None
 
-    xy = []
+    rod_meta = load_json(rod_dir / "meta.json") or {}
+    rod_id = str(rod_meta.get("rod_id", rod_dir.name))
+    brightness_mean = float("nan")
+    brightness_peak2x2_mean = float("nan")
+    brightness_p99 = float("nan")
+    brightness_p98 = float("nan")
+    has_pixel_255 = False
+    npy_path: Optional[Path] = None
+    xy: list[tuple[float, float]] = []
+    included_values = np.asarray([], dtype=np.float64)
     for v in xy_raw:
         if isinstance(v, (list, tuple)) and len(v) >= 2:
             try:
-                x = float(v[0])
-                y = float(v[1])
+                x_v = float(v[0])
+                y_v = float(v[1])
             except Exception:
                 continue
-            if np.isfinite(x) and np.isfinite(y):
-                xy.append((x, y))
+            if np.isfinite(x_v) and np.isfinite(y_v):
+                xy.append((x_v, y_v))
+    try:
+        npy_name = str(meta.get("npy_file", ""))
+        npy_path = rod_dir / npy_name if npy_name else None
+        if npy_path is not None and npy_path.exists():
+            roi_meta = {}
+            try:
+                roi_meta = dict((meta.get("actual") or {}).get("roi") or {})
+            except Exception:
+                roi_meta = {}
+            arr_stack = _load_stack_for_analysis(npy_path, roi_meta=roi_meta)
+            if getattr(arr_stack, "size", 0) > 0:
+                has_pixel_255 = bool(np.any(arr_stack >= 255))
+                if roi_meta:
+                    roi_meta["w"] = int(arr_stack.shape[2]) if getattr(arr_stack, "ndim", 0) >= 3 else int(roi_meta.get("w", 14))
+                    roi_meta["h"] = int(arr_stack.shape[1]) if getattr(arr_stack, "ndim", 0) >= 3 else int(roi_meta.get("h", 14))
+                    roi_meta["win_raw"] = int(arr_stack.shape[2]) if getattr(arr_stack, "ndim", 0) >= 3 else int(roi_meta.get("win_raw", 14))
+                if roi_meta:
+                    _, _, included_values = _recompute_xy_series_from_stack(arr_stack, roi_meta)
+                if included_values.size > 0:
+                    brightness_mean = float(np.mean(included_values))
+                    brightness_p99 = float(np.percentile(included_values, 99.0))
+                    brightness_p98 = float(np.percentile(included_values, 98.0))
+                else:
+                    brightness_mean = float(np.mean(arr_stack))
+                    brightness_p99 = float(np.percentile(arr_stack, 99.0))
+                    brightness_p98 = float(np.percentile(arr_stack, 98.0))
+                frame_mean = None
+                if getattr(arr_stack, "ndim", 0) >= 3:
+                    frame_mean = np.asarray(np.mean(arr_stack, axis=0), dtype=np.float64)
+                elif getattr(arr_stack, "ndim", 0) == 2:
+                    frame_mean = np.asarray(arr_stack, dtype=np.float64)
+                if frame_mean is not None and frame_mean.ndim == 2:
+                    h, w = frame_mean.shape
+                    if h >= 2 and w >= 2:
+                        block_means = 0.25 * (
+                            frame_mean[:-1, :-1]
+                            + frame_mean[1:, :-1]
+                            + frame_mean[:-1, 1:]
+                            + frame_mean[1:, 1:]
+                        )
+                        if block_means.size > 0:
+                            brightness_peak2x2_mean = float(np.max(block_means))
+    except Exception:
+        brightness_mean = float("nan")
+        brightness_peak2x2_mean = float("nan")
+        brightness_p99 = float("nan")
+        brightness_p98 = float("nan")
+        has_pixel_255 = False
+        xy = []
 
+    if len(xy) < int(min_frames):
+        try:
+            roi_meta = dict((meta.get("actual") or {}).get("roi") or {})
+        except Exception:
+            roi_meta = {}
+        if npy_path is not None and npy_path.exists() and roi_meta:
+            try:
+                arr_stack = _load_stack_for_analysis(npy_path, roi_meta=roi_meta)
+                if getattr(arr_stack, "ndim", 0) >= 3 and getattr(arr_stack, "size", 0) > 0:
+                    roi_meta["w"] = int(arr_stack.shape[2])
+                    roi_meta["h"] = int(arr_stack.shape[1])
+                    roi_meta["win_raw"] = int(arr_stack.shape[2])
+                    xy, _, _ = _recompute_xy_series_from_stack(arr_stack, roi_meta)
+            except Exception:
+                xy = []
     if len(xy) < int(min_frames):
         return None
 
@@ -297,22 +693,9 @@ def analyze_mode(rod_dir: Path, mode: str, min_frames: int) -> Optional[RodResul
     _, phi_err_rad = circular_sigma_phi(phi)
     phi_err_deg = float(np.degrees(phi_err_rad)) if np.isfinite(phi_err_rad) else float("nan")
 
-    rod_meta = load_json(rod_dir / "meta.json") or {}
-    rod_id = str(rod_meta.get("rod_id", rod_dir.name))
     theta_center_rad = float(np.radians(theta_center_deg))
     s2 = float(np.sin(theta_center_rad) ** 2)
     s2 = max(s2, 1e-6)
-    brightness_mean = float("nan")
-    npy_path: Optional[Path] = None
-    try:
-        npy_name = str(meta.get("npy_file", ""))
-        npy_path = rod_dir / npy_name if npy_name else None
-        if npy_path is not None and npy_path.exists():
-            arr_stack = np.load(npy_path, mmap_mode="r", allow_pickle=False)
-            if getattr(arr_stack, "size", 0) > 0:
-                brightness_mean = float(np.mean(arr_stack))
-    except Exception:
-        brightness_mean = float("nan")
     brightness_abs_norm = (
         float(brightness_mean / s2) if np.isfinite(brightness_mean) else float("nan")
     )
@@ -328,6 +711,10 @@ def analyze_mode(rod_dir: Path, mode: str, min_frames: int) -> Optional[RodResul
         r_mean=float(np.nanmean(r)),
         xy_var_score=xy_var_score,
         brightness_mean=brightness_mean,
+        brightness_peak2x2_mean=brightness_peak2x2_mean,
+        brightness_p99=brightness_p99,
+        brightness_p98=brightness_p98,
+        has_pixel_255=has_pixel_255,
         brightness_abs_norm=brightness_abs_norm,
         npy_path=str(npy_path) if (npy_path is not None and npy_path.exists()) else "",
     )
@@ -338,6 +725,10 @@ def fit_noise_model_for_mode(
     mode: Optional[str],
     theta_weight_bandwidth_deg: float,
     use_density_weight: bool = True,
+    zero_b: bool = False,
+    zero_sigma_bg: bool = False,
+    zero_i0: bool = False,
+    fixed_n_like: Optional[float] = None,
 ) -> Optional[ModeFit]:
     sub = [
         r
@@ -358,7 +749,7 @@ def fit_noise_model_for_mode(
     sig_phi = np.radians(np.asarray([r.phi_err_deg for r in sub], dtype=np.float64))
     th_deg = np.asarray([r.theta_deg for r in sub], dtype=np.float64)
     th_rad = np.radians(th_deg)
-    npix = np.asarray([roi_pixels_for_mode(r.mode) for r in sub], dtype=np.float64)
+    npix_seed = np.asarray([roi_pixels_for_mode(r.mode) for r in sub], dtype=np.float64)
 
     ok = (
         np.isfinite(rr)
@@ -420,33 +811,103 @@ def fit_noise_model_for_mode(
     a_param = 1.0
     b_param = 0.1
     sigma_bg = 1.0
+    i0_intensity = float(
+        np.nanpercentile(
+            [r.brightness_mean for r in sub if np.isfinite(r.brightness_mean) and r.brightness_mean > 0.0],
+            5.0,
+        )
+    )
+    if (not np.isfinite(i0_intensity)) or i0_intensity <= 0.0:
+        i0_intensity = float(
+            np.nanmedian(
+                [r.brightness_mean for r in sub if np.isfinite(r.brightness_mean) and r.brightness_mean > 0.0]
+            )
+        )
+    i0_intensity = max(1e-6, i0_intensity if np.isfinite(i0_intensity) else 10.0)
     k_intensity = float(np.nanmedian([r.brightness_abs_norm for r in sub if np.isfinite(r.brightness_abs_norm) and r.brightness_abs_norm > 0.0]))
     k_intensity = max(1e-6, k_intensity if np.isfinite(k_intensity) else 10.0)
+    n_like = float(np.nanmedian(npix_seed)) if npix_seed.size else 225.0
+    n_like = max(1.0, n_like if np.isfinite(n_like) else 225.0)
+    if fixed_n_like is not None and np.isfinite(float(fixed_n_like)) and float(fixed_n_like) > 0.0:
+        n_like = float(fixed_n_like)
 
     if least_squares is not None:
+        active_names = ["a_param"]
+        if not zero_b:
+            active_names.append("b_param")
+        if not zero_sigma_bg:
+            active_names.append("sigma_bg")
+        if not zero_i0:
+            active_names.append("i0_intensity")
+        active_names.append("k_intensity")
+        if fixed_n_like is None:
+            active_names.append("n_like")
+
+        def _params_from_vector(params: np.ndarray) -> tuple[float, float, float, float, float, float]:
+            vals = {
+                "a_param": float(a_param),
+                "b_param": 0.0 if zero_b else float(b_param),
+                "sigma_bg": 0.0 if zero_sigma_bg else float(sigma_bg),
+                "i0_intensity": 0.0 if zero_i0 else float(i0_intensity),
+                "k_intensity": float(k_intensity),
+                "n_like": float(n_like),
+            }
+            for idx, name in enumerate(active_names):
+                vals[name] = float(params[idx])
+            return (
+                vals["a_param"],
+                vals["b_param"],
+                vals["sigma_bg"],
+                vals["i0_intensity"],
+                vals["k_intensity"],
+                vals["n_like"],
+            )
+
         def _resid(params: np.ndarray) -> np.ndarray:
-            a_v = float(params[0])
-            b_v = float(params[1])
-            s_bg = float(params[2])
-            k_v = float(params[3])
-            i_theta = np.maximum((s_bg * s_bg) + (k_v * (np.sin(th_rad) ** 2)), 1e-9)
-            var_xy = ((a_v / i_theta) + (0.5 * b_v * b_v) + ((2.0 * s_bg * s_bg) / np.maximum(i_theta * i_theta, 1e-18))) / np.maximum(npix, 1.0)
+            a_v, b_v, s_bg, i0_v, k_v, n_v = _params_from_vector(params)
+            i_theta = np.maximum(i0_v + (k_v * (np.sin(th_rad) ** 2)), 1e-9)
+            var_xy = ((a_v / i_theta) + (0.5 * b_v * b_v) + ((2.0 * s_bg * s_bg) / np.maximum(i_theta * i_theta, 1e-18))) / max(1.0, n_v)
             pred_theta = d2 * var_xy
             pred_phi = var_xy / (4.0 * rr * rr)
             e_theta = np.sqrt(w_base) * (pred_theta - y_theta)
             e_phi = np.sqrt(w_base * w_phi_scale) * (pred_phi - y_phi)
             return np.concatenate([e_theta, e_phi], axis=0)
 
+        full_seeds = [
+            {
+                "a_param": 1.0,
+                "b_param": 0.1,
+                "sigma_bg": 1.0,
+                "i0_intensity": i0_intensity,
+                "k_intensity": k_intensity,
+                "n_like": n_like,
+            },
+            {
+                "a_param": 0.5,
+                "b_param": 0.2,
+                "sigma_bg": 0.7,
+                "i0_intensity": 0.5 * i0_intensity,
+                "k_intensity": 0.5 * k_intensity,
+                "n_like": 0.7 * n_like,
+            },
+            {
+                "a_param": 2.0,
+                "b_param": 0.05,
+                "sigma_bg": 1.5,
+                "i0_intensity": 1.5 * i0_intensity,
+                "k_intensity": 2.0 * k_intensity,
+                "n_like": 1.5 * n_like,
+            },
+        ]
         seeds = [
-            np.array([1.0, 0.1, 1.0, k_intensity], dtype=np.float64),
-            np.array([0.5, 0.2, 0.7, 0.5 * k_intensity], dtype=np.float64),
-            np.array([2.0, 0.05, 1.5, 2.0 * k_intensity], dtype=np.float64),
+            np.asarray([float(s[name]) for name in active_names], dtype=np.float64)
+            for s in full_seeds
         ]
 
         best = None
         best_cost = float("inf")
-        lb = np.array([1e-12, 1e-12, 1e-12, 1e-12], dtype=np.float64)
-        ub = np.array([np.inf, np.inf, np.inf, np.inf], dtype=np.float64)
+        lb = np.asarray([1e-12 for _ in active_names], dtype=np.float64)
+        ub = np.asarray([np.inf for _ in active_names], dtype=np.float64)
         for x0 in seeds:
             try:
                 x0_use = np.minimum(np.maximum(x0, lb), ub)
@@ -456,18 +917,19 @@ def fit_noise_model_for_mode(
                     best_cost = float(res.cost)
             except Exception:
                 continue
-        if best is not None and best.x.size >= 3:
-            a_param = float(max(0.0, best.x[0]))
-            b_param = float(max(0.0, best.x[1]))
-            sigma_bg = float(max(0.0, best.x[2]))
-            k_intensity = float(max(0.0, best.x[3]))
+        if best is not None and best.x.size >= len(active_names):
+            a_param, b_param, sigma_bg, i0_intensity, k_intensity, n_like = _params_from_vector(
+                np.maximum(np.asarray(best.x, dtype=np.float64), lb)
+            )
 
     return ModeFit(
         mode=mode if mode is not None else "combined",
         a_param=max(0.0, a_param),
         b_param=max(0.0, b_param),
         sigma_bg=max(0.0, sigma_bg),
+        i0_intensity=max(1e-9, i0_intensity),
         k_intensity=max(1e-9, k_intensity),
+        n_like=max(1.0, n_like),
         n_used=int(rr.size),
     )
 
@@ -566,7 +1028,7 @@ def fit_shared_noise_two_datasets(
     s0 = 1.0
 
     for li, (ds_name, mode_name) in enumerate(
-        [("40nm", "77fps"), ("40nm", "maxfps_11x11"), ("25nm", "77fps"), ("25nm", "maxfps_11x11")]
+        [("40nm", "77fps"), ("40nm", "maxfps_15x15"), ("25nm", "77fps"), ("25nm", "maxfps_15x15")]
     ):
         src_rows = rows_old if ds_name == "40nm" else rows_new
         sub_rows = [r for r in src_rows if r.mode == mode_name]
@@ -680,7 +1142,7 @@ def fit_intensity_theta_model(rows: list[RodResult]) -> Optional[IntensityThetaF
         if np.isfinite(r.theta_deg)
         and np.isfinite(r.brightness_mean)
         and (r.brightness_mean > 0.0)
-        and (r.mode in ("77fps", "maxfps_11x11"))
+        and (r.mode in ("77fps", "maxfps_15x15"))
     ]
     if len(sub) < 3:
         return None
@@ -711,12 +1173,130 @@ def fit_intensity_theta_model(rows: list[RodResult]) -> Optional[IntensityThetaF
         return (float(x0[0]), float(x0[1]))
 
     c77, k77 = _fit_mode("77fps")
-    c11, k11 = _fit_mode("maxfps_11x11")
+    c11, k11 = _fit_mode("maxfps_15x15")
     return IntensityThetaFit(
         i_const_77=c77,
         k_77=k77,
         i_const_11=c11,
         k_11=k11,
+        n_used=len(sub),
+    )
+
+
+def fit_intensity_sin2_model(rows: list[RodResult]) -> Optional[IntensitySin2Fit]:
+    sub = [
+        r
+        for r in rows
+        if np.isfinite(r.theta_deg)
+        and np.isfinite(r.brightness_mean)
+        and (r.brightness_mean >= 0.0)
+        and (r.mode in ("77fps", "maxfps_15x15"))
+    ]
+    if len(sub) < 3:
+        return None
+
+    def _fit_mode(mode_name: str) -> float:
+        msub = [r for r in sub if r.mode == mode_name]
+        if len(msub) < 2:
+            return float("nan")
+        th = np.radians(np.asarray([r.theta_deg for r in msub], dtype=np.float64))
+        s2 = np.sin(th) ** 2
+        y = np.asarray([r.brightness_mean for r in msub], dtype=np.float64)
+        ok = np.isfinite(s2) & np.isfinite(y) & (s2 > 0.0) & (y >= 0.0)
+        s2 = s2[ok]
+        y = y[ok]
+        if s2.size < 2:
+            return float("nan")
+        k0 = float(np.sum(s2 * y) / max(np.sum(s2 * s2), 1e-18))
+        k0 = max(1e-12, k0)
+        if least_squares is not None:
+            def _resid(p: np.ndarray) -> np.ndarray:
+                k_v = float(p[0])
+                return (k_v * s2) - y
+            try:
+                res = least_squares(
+                    _resid,
+                    x0=np.asarray([k0], dtype=np.float64),
+                    bounds=(np.asarray([1e-12], dtype=np.float64), np.asarray([np.inf], dtype=np.float64)),
+                    method="trf",
+                    max_nfev=3000,
+                )
+                if res.success and res.x.size >= 1:
+                    k0 = max(1e-12, float(res.x[0]))
+            except Exception:
+                pass
+        return float(k0)
+
+    return IntensitySin2Fit(
+        k_77=_fit_mode("77fps"),
+        k_15=_fit_mode("maxfps_15x15"),
+        n_used=len(sub),
+    )
+
+
+def fit_intensity_projected_spread_model(
+    rows: list[RodResult],
+) -> Optional[IntensityProjectedSpreadFit]:
+    sub = [
+        r
+        for r in rows
+        if np.isfinite(r.theta_deg)
+        and np.isfinite(r.brightness_mean)
+        and (r.mode in ("77fps", "maxfps_15x15"))
+    ]
+    if len(sub) < 3:
+        return None
+
+    def _fit_mode(mode_name: str) -> tuple[float, float]:
+        msub = [r for r in sub if r.mode == mode_name]
+        if len(msub) < 3:
+            return (float("nan"), float("nan"))
+        th = np.radians(np.asarray([r.theta_deg for r in msub], dtype=np.float64))
+        s = np.sin(th)
+        s2 = s * s
+        y = np.asarray([r.brightness_mean for r in msub], dtype=np.float64)
+        ok = np.isfinite(s) & np.isfinite(s2) & np.isfinite(y) & (s2 > 0.0) & (y >= 0.0)
+        s = s[ok]
+        s2 = s2[ok]
+        y = y[ok]
+        if s.size < 3:
+            return (float("nan"), float("nan"))
+        k0 = float(np.sum(s2 * y) / max(np.sum(s2 * s2), 1e-18))
+        k0 = max(1e-12, k0)
+        q0 = 1.0
+
+        def _model(k_v: float, q_v: float) -> np.ndarray:
+            return k_v * s2 / (1.0 + (q_v * s))
+
+        if least_squares is not None:
+            def _resid(p: np.ndarray) -> np.ndarray:
+                k_v = float(p[0])
+                q_v = float(p[1])
+                return _model(k_v, q_v) - y
+            try:
+                res = least_squares(
+                    _resid,
+                    x0=np.asarray([k0, q0], dtype=np.float64),
+                    bounds=(
+                        np.asarray([1e-12, 0.0], dtype=np.float64),
+                        np.asarray([np.inf, 100.0], dtype=np.float64),
+                    ),
+                    method="trf",
+                    max_nfev=5000,
+                )
+                if res.success and res.x.size >= 2:
+                    return (max(1e-12, float(res.x[0])), max(0.0, float(res.x[1])))
+            except Exception:
+                pass
+        return (k0, q0)
+
+    k77, q77 = _fit_mode("77fps")
+    k15, q15 = _fit_mode("maxfps_15x15")
+    return IntensityProjectedSpreadFit(
+        k_77=k77,
+        q_77=q77,
+        k_15=k15,
+        q_15=q15,
         n_used=len(sub),
     )
 
@@ -728,7 +1308,7 @@ def fit_intensity_theta_from_r_extrema(rows: list[RodResult]) -> Optional[Intens
         if np.isfinite(r.theta_deg)
         and np.isfinite(r.r_mean)
         and np.isfinite(r.brightness_mean)
-        and (r.mode in ("77fps", "maxfps_11x11"))
+        and (r.mode in ("77fps", "maxfps_15x15"))
     ]
     if len(sub) < 2:
         return None
@@ -744,7 +1324,7 @@ def fit_intensity_theta_from_r_extrema(rows: list[RodResult]) -> Optional[Intens
         return (i0, i_max - i0)
 
     i0_77, k_77 = _fit_mode("77fps")
-    i0_11, k_11 = _fit_mode("maxfps_11x11")
+    i0_11, k_11 = _fit_mode("maxfps_15x15")
     if not (np.isfinite(i0_77) and np.isfinite(k_77) and np.isfinite(i0_11) and np.isfinite(k_11)):
         return None
 
@@ -771,17 +1351,18 @@ def make_intensity_theta_extrema_plot(
         if np.isfinite(r.theta_deg)
         and np.isfinite(r.brightness_mean)
         and np.isfinite(r.r_mean)
-        and (r.mode in ("77fps", "maxfps_11x11"))
+        and (r.mode in ("77fps", "maxfps_15x15"))
     ]
     if not pts:
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=130)
-    colors = {"77fps": "tab:blue", "maxfps_11x11": "tab:orange"}
-    labels = {"77fps": "77fps 15x15 pixels", "maxfps_11x11": "1600fps"}
+    colors = {"77fps": "tab:blue", "maxfps_15x15": "tab:orange"}
+    labels = {"77fps": "77fps 15x15 pixels", "maxfps_15x15": "maxfps 15x15 pixels"}
+    sat_label_drawn = False
 
-    for mode in ("77fps", "maxfps_11x11"):
+    for mode in ("77fps", "maxfps_15x15"):
         sub = [r for r in pts if r.mode == mode]
         if not sub:
             continue
@@ -849,7 +1430,7 @@ def build_intensity_theta_points(
 ) -> list[dict]:
     pts: list[dict] = []
     for r in rows:
-        if r.mode not in ("77fps", "maxfps_11x11"):
+        if r.mode not in ("77fps", "maxfps_15x15"):
             continue
         if r.mode == "77fps":
             k_mode = fit_i.k_77
@@ -944,10 +1525,179 @@ def fit_intensity_theta_error_model(
         return None
 
 
+def fit_irod_noise_model(
+    rows: list[RodResult],
+    theta_weight_bandwidth_deg: float,
+    use_density_weight: bool = True,
+    zero_b: bool = False,
+    zero_sigma_bg: bool = False,
+) -> Optional[IrodFit]:
+    sub = [
+        r
+        for r in rows
+        if np.isfinite(r.r_mean)
+        and np.isfinite(r.theta_err_deg)
+        and np.isfinite(r.phi_err_deg)
+        and np.isfinite(r.theta_deg)
+        and np.isfinite(r.brightness_mean)
+        and (r.brightness_mean > 0.0)
+    ]
+    if len(sub) < 2:
+        return None
+
+    rr = np.asarray([r.r_mean for r in sub], dtype=np.float64)
+    sig_theta = np.radians(np.asarray([r.theta_err_deg for r in sub], dtype=np.float64))
+    sig_phi = np.radians(np.asarray([r.phi_err_deg for r in sub], dtype=np.float64))
+    th_deg = np.asarray([r.theta_deg for r in sub], dtype=np.float64)
+    i_rod = np.asarray([r.brightness_mean for r in sub], dtype=np.float64)
+
+    ok = (
+        np.isfinite(rr)
+        & np.isfinite(sig_theta)
+        & np.isfinite(sig_phi)
+        & np.isfinite(th_deg)
+        & np.isfinite(i_rod)
+        & (rr > 1e-6)
+        & (sig_theta > 0.0)
+        & (sig_phi > 0.0)
+        & (i_rod > 0.0)
+    )
+    rr = rr[ok]
+    sig_theta = sig_theta[ok]
+    sig_phi = sig_phi[ok]
+    th_deg = th_deg[ok]
+    i_rod = i_rod[ok]
+    if rr.size < 2:
+        return None
+
+    dth = dtheta_dr_hole_fresnel(rr)
+    d2 = dth * dth
+    ok_d = np.isfinite(d2) & (d2 > 0.0)
+    rr = rr[ok_d]
+    sig_theta = sig_theta[ok_d]
+    sig_phi = sig_phi[ok_d]
+    th_deg = th_deg[ok_d]
+    i_rod = i_rod[ok_d]
+    d2 = d2[ok_d]
+    if rr.size < 2:
+        return None
+
+    y_theta = sig_theta * sig_theta
+    y_phi = sig_phi * sig_phi
+
+    if use_density_weight:
+        bw = max(1e-6, float(theta_weight_bandwidth_deg))
+        d = (th_deg[:, None] - th_deg[None, :]) / bw
+        local_density = np.sum(np.exp(-0.5 * d * d), axis=1)
+        w_base = 1.0 / np.maximum(local_density, 1e-12)
+        w_base = w_base * (float(w_base.size) / float(np.sum(w_base)))
+    else:
+        w_base = np.ones(rr.shape, dtype=np.float64)
+
+    low_mask = np.isfinite(th_deg) & (th_deg >= 0.0) & (th_deg <= LOW_THETA_WEIGHT_MAX_DEG)
+    if np.any(low_mask):
+        w_base[low_mask] = w_base[low_mask] * float(max(1.0, LOW_THETA_WEIGHT_FACTOR))
+
+    med_theta = float(np.nanmedian(y_theta)) if y_theta.size else float("nan")
+    med_phi = float(np.nanmedian(y_phi)) if y_phi.size else float("nan")
+    if np.isfinite(med_theta) and np.isfinite(med_phi) and (med_theta > 0.0) and (med_phi > 0.0):
+        w_phi_scale = float(np.clip(med_theta / med_phi, 1.0, 100.0))
+    else:
+        w_phi_scale = 1.0
+
+    a_param = 1.0
+    b_param = 0.1
+    sigma_bg = 1.0
+    n_like = float(np.nanmedian([roi_pixels_for_mode(r.mode) for r in sub])) if sub else 225.0
+    n_like = max(1.0, n_like if np.isfinite(n_like) else 225.0)
+
+    if least_squares is not None:
+        active_names = ["a_param"]
+        if not zero_b:
+            active_names.append("b_param")
+        if not zero_sigma_bg:
+            active_names.append("sigma_bg")
+        active_names.append("n_like")
+
+        def _params_from_vector(params: np.ndarray) -> tuple[float, float, float, float]:
+            vals = {
+                "a_param": float(a_param),
+                "b_param": 0.0 if zero_b else float(b_param),
+                "sigma_bg": 0.0 if zero_sigma_bg else float(sigma_bg),
+                "n_like": float(n_like),
+            }
+            for idx, name in enumerate(active_names):
+                vals[name] = float(params[idx])
+            return (vals["a_param"], vals["b_param"], vals["sigma_bg"], vals["n_like"])
+
+        def _resid(params: np.ndarray) -> np.ndarray:
+            a_v, b_v, s_bg, n_v = _params_from_vector(params)
+            var_xy = (
+                (a_v / i_rod)
+                + (0.5 * b_v * b_v)
+                + ((2.0 * s_bg * s_bg) / np.maximum(i_rod * i_rod, 1e-18))
+            ) / max(1.0, n_v)
+            pred_theta = d2 * var_xy
+            pred_phi = var_xy / (4.0 * rr * rr)
+            e_theta = np.sqrt(w_base) * (pred_theta - y_theta)
+            e_phi = np.sqrt(w_base * w_phi_scale) * (pred_phi - y_phi)
+            return np.concatenate([e_theta, e_phi], axis=0)
+
+        seeds = [
+            {"a_param": 1.0, "b_param": 0.1, "sigma_bg": 1.0, "n_like": n_like},
+            {"a_param": 0.5, "b_param": 0.2, "sigma_bg": 0.7, "n_like": 0.7 * n_like},
+            {"a_param": 2.0, "b_param": 0.05, "sigma_bg": 1.5, "n_like": 1.5 * n_like},
+            {"a_param": 0.2, "b_param": 0.0, "sigma_bg": 0.2, "n_like": 0.25 * n_like},
+        ]
+
+        best_cost = float("inf")
+        best_vec: Optional[np.ndarray] = None
+        for seed in seeds:
+            x0 = np.asarray([float(seed[name]) for name in active_names], dtype=np.float64)
+            lb = []
+            ub = []
+            for name in active_names:
+                if name == "n_like":
+                    lb.append(1e-6)
+                    ub.append(np.inf)
+                else:
+                    lb.append(0.0)
+                    ub.append(np.inf)
+            try:
+                res = least_squares(
+                    _resid,
+                    x0=x0,
+                    bounds=(np.asarray(lb, dtype=np.float64), np.asarray(ub, dtype=np.float64)),
+                    method="trf",
+                    max_nfev=10000,
+                )
+            except Exception:
+                continue
+            if not res.success or res.x.size != len(active_names):
+                continue
+            cost = float(np.sum(_resid(np.asarray(res.x, dtype=np.float64)) ** 2))
+            if cost < best_cost:
+                best_cost = cost
+                best_vec = np.asarray(res.x, dtype=np.float64)
+
+        if best_vec is not None:
+            a_param, b_param, sigma_bg, n_like = _params_from_vector(best_vec)
+            return IrodFit(
+                fit_name="",
+                a_param=float(max(0.0, a_param)),
+                b_param=0.0 if zero_b else float(max(0.0, b_param)),
+                sigma_bg=0.0 if zero_sigma_bg else float(max(0.0, sigma_bg)),
+                n_like=float(max(1e-6, n_like)),
+                n_used=int(rr.size),
+            )
+
+    return None
+
+
 def sigma_xy_model(theta_rad: np.ndarray, fit: ModeFit, mode: Optional[str] = None) -> np.ndarray:
     theta_rad = np.asarray(theta_rad, dtype=np.float64)
-    i_use = np.maximum((fit.sigma_bg * fit.sigma_bg) + (fit.k_intensity * (np.sin(theta_rad) ** 2)), 1e-9)
-    npix = roi_pixels_for_mode(mode if mode is not None else "maxfps_11x11")
+    i_use = np.maximum(fit.i0_intensity + (fit.k_intensity * (np.sin(theta_rad) ** 2)), 1e-9)
+    npix = float(max(1.0, fit.n_like))
     return np.sqrt(
         (
             (fit.a_param / i_use)
@@ -979,6 +1729,45 @@ def predict_theta_err_rad(r: np.ndarray, theta_rad: np.ndarray, fit: ModeFit, mo
     sxy = sigma_xy_model(theta_rad, fit, mode=mode_use)
     out = np.abs(dth) * sxy
     return out
+
+
+def sigma_xy_irod_model(i_rod: np.ndarray, fit: IrodFit) -> np.ndarray:
+    i_rod = np.asarray(i_rod, dtype=np.float64)
+    i_use = np.maximum(i_rod, 1e-9)
+    npix = float(max(1.0e-6, fit.n_like))
+    return np.sqrt(
+        (
+            (fit.a_param / i_use)
+            + (0.5 * fit.b_param * fit.b_param)
+            + ((2.0 * fit.sigma_bg * fit.sigma_bg) / np.maximum(i_use * i_use, 1e-18))
+        )
+        / npix
+    )
+
+
+def predict_phi_err_deg_irod(rows: list[RodResult], fit: IrodFit) -> tuple[np.ndarray, np.ndarray]:
+    if not rows:
+        return (np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64))
+    th = np.asarray([r.theta_deg for r in rows], dtype=np.float64)
+    rr = np.asarray([r.r_mean for r in rows], dtype=np.float64)
+    i_rod = np.asarray([r.brightness_mean for r in rows], dtype=np.float64)
+    sxy = sigma_xy_irod_model(i_rod, fit)
+    y = np.degrees(sxy / np.maximum(2.0 * rr, 1e-12))
+    ok = np.isfinite(th) & np.isfinite(y) & np.isfinite(rr) & np.isfinite(i_rod) & (rr > 1e-9) & (i_rod > 0.0)
+    return (th[ok], y[ok])
+
+
+def predict_theta_err_deg_irod(rows: list[RodResult], fit: IrodFit) -> tuple[np.ndarray, np.ndarray]:
+    if not rows:
+        return (np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64))
+    th = np.asarray([r.theta_deg for r in rows], dtype=np.float64)
+    rr = np.asarray([r.r_mean for r in rows], dtype=np.float64)
+    i_rod = np.asarray([r.brightness_mean for r in rows], dtype=np.float64)
+    dth = dtheta_dr_hole_fresnel(rr)
+    sxy = sigma_xy_irod_model(i_rod, fit)
+    y = np.degrees(np.abs(dth) * sxy)
+    ok = np.isfinite(th) & np.isfinite(y) & np.isfinite(rr) & np.isfinite(i_rod) & np.isfinite(dth) & (i_rod > 0.0)
+    return (th[ok], y[ok])
 
 
 def predict_theta_err_intensity_deg(
@@ -1025,11 +1814,11 @@ def theta_theory_grid_deg() -> np.ndarray:
 
 def write_csv(path: Path, rows: list[RodResult]) -> None:
     lines = [
-        "rod_id,rod_key,mode,n_frames,theta_deg,theta_err_deg,phi_err_deg,r_mean,xy_var_score,brightness_mean,brightness_abs_norm",
+        "rod_id,rod_key,mode,n_frames,theta_deg,theta_err_deg,phi_err_deg,r_mean,xy_var_score,brightness_mean,brightness_peak2x2_mean,brightness_p99,brightness_p98,has_pixel_255,brightness_abs_norm",
     ]
     for r in rows:
         lines.append(
-            f"{r.rod_id},{r.rod_key},{r.mode},{r.n_frames},{r.theta_deg:.8g},{r.theta_err_deg:.8g},{r.phi_err_deg:.8g},{r.r_mean:.8g},{r.xy_var_score:.8g},{r.brightness_mean:.8g},{r.brightness_abs_norm:.8g}"
+            f"{r.rod_id},{r.rod_key},{r.mode},{r.n_frames},{r.theta_deg:.8g},{r.theta_err_deg:.8g},{r.phi_err_deg:.8g},{r.r_mean:.8g},{r.xy_var_score:.8g},{r.brightness_mean:.8g},{r.brightness_peak2x2_mean:.8g},{r.brightness_p99:.8g},{r.brightness_p98:.8g},{int(bool(r.has_pixel_255))},{r.brightness_abs_norm:.8g}"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1118,19 +1907,36 @@ def remove_phi_theta_anomalies_keep_low_theta(rows: list[RodResult]) -> tuple[li
 
 def write_fit_json(path: Path, fits: dict[str, ModeFit]) -> None:
     payload = {
-        "model": "I(theta)=sigma_bg^2+K*sin(theta)^2; sigma_xy^2=(a/I + b^2/2 + 2*sigma_bg^2/I^2)/Npix(mode); sigma_phi^2=sigma_xy^2/(4r^2); sigma_theta^2=(dtheta/dr)^2*sigma_xy^2",
+        "model": "I(theta)=I0+K*sin(theta)^2; sigma_xy^2=(a/I + b^2/2 + 2*sigma_bg^2/I^2)/Npix(mode); sigma_phi^2=sigma_xy^2/(4r^2); sigma_theta^2=(dtheta/dr)^2*sigma_xy^2",
         "fits": {
             m: {
                 "a_param": float(f.a_param),
                 "b_param": float(f.b_param),
                 "sigma_bg": float(f.sigma_bg),
+                "i0_intensity": float(f.i0_intensity),
                 "k_intensity": float(f.k_intensity),
-                "roi_pixels_mode": (
-                    "mixed(11x11,15x15)" if f.mode == "combined" else float(roi_pixels_for_mode(f.mode))
-                ),
+                "n_like": float(f.n_like),
+                "roi_pixels_mode": ("mixed" if f.mode == "combined" else float(roi_pixels_for_mode(f.mode))),
                 "n_used": int(f.n_used),
             }
             for m, f in fits.items()
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def write_irod_fit_json(path: Path, fits: dict[str, IrodFit]) -> None:
+    payload = {
+        "model": "I_rod=mean intensity of each rod's 15x15 ROI; sigma_xy^2=(a/I_rod + b^2/2 + 2*sigma_bg^2/I_rod^2)/N_like; sigma_phi^2=sigma_xy^2/(4r^2); sigma_theta^2=(dtheta/dr)^2*sigma_xy^2",
+        "fits": {
+            name: {
+                "a_param": float(f.a_param),
+                "b_param": float(f.b_param),
+                "sigma_bg": float(f.sigma_bg),
+                "n_like": float(f.n_like),
+                "n_used": int(f.n_used),
+            }
+            for name, f in fits.items()
         },
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
@@ -1157,9 +1963,9 @@ def add_scatter_by_mode(
     xlim: tuple[float, float],
     x_mapper=None,
 ) -> None:
-    modes = ["77fps", "maxfps_11x11"]
-    colors = {"77fps": "tab:blue", "maxfps_11x11": "tab:orange"}
-    labels = {"77fps": "77fps 15x15 pixels", "maxfps_11x11": "1600fps"}
+    modes = ["77fps", "maxfps_15x15"]
+    colors = {"77fps": "tab:blue", "maxfps_15x15": "tab:orange"}
+    labels = {"77fps": "77fps 15x15 pixels", "maxfps_15x15": "maxfps 15x15 pixels"}
     used_any = False
     for m in modes:
         sub = [r for r in rows if r.mode == m and np.isfinite(getattr(r, y_attr)) and np.isfinite(r.theta_deg)]
@@ -1184,7 +1990,7 @@ def add_scatter_by_mode(
 
     if used_any:
         ax.legend(frameon=False, fontsize=9)
-    ax.set_xlabel("theta (deg) [hole+fresnel from r]")
+    ax.set_xlabel("theta (deg) [finite-NA cutout from r]")
     ax.set_ylabel(y_label)
     ax.set_xlim(*xlim)
     ax.grid(True, alpha=0.3)
@@ -1202,7 +2008,6 @@ def add_theory_curves(
     if not fits:
         return
 
-    fit = next(iter(fits.values()))
     theta_deg_grid = theta_theory_grid_deg()
     keep = theta_deg_grid <= THETA_THEORY_PLOT_MAX_DEG
     if xlim is not None:
@@ -1212,38 +2017,58 @@ def add_theory_curves(
         return
     theta_rad_grid = np.radians(theta_deg_grid)
     r_grid = r_from_theta_hole_fresnel(theta_rad_grid)
-    ok = np.isfinite(r_grid) & (r_grid >= 0.0) & (r_grid < THETA_R_MAX)
+    ok = np.isfinite(r_grid) & (r_grid >= 0.0) & (r_grid < float(_theta_recon_params()["r_max"]))
     if np.count_nonzero(ok) < 2:
         return
-    mode_styles = [
-        ("77fps", "tab:blue", "Fit (77fps 15x15 pixels)"),
-        ("maxfps_11x11", "tab:orange", "Fit (1600fps)"),
-    ]
-    for mode_name, color, label in mode_styles:
-        if which == "phi":
-            y_deg = np.degrees(predict_phi_err_rad(r_grid[ok], theta_rad_grid[ok], fit, mode=mode_name))
-        else:
-            y_deg = np.degrees(predict_theta_err_rad(r_grid[ok], theta_rad_grid[ok], fit, mode=mode_name))
+    variant_styles = {
+        "combined": ("black", "-"),
+        "b0": ("tab:blue", "--"),
+        "sigma_bg0": ("tab:orange", "--"),
+        "i00": ("tab:green", "--"),
+        "b0_sigma_bg0": ("tab:red", ":"),
+        "b0_i00": ("tab:purple", ":"),
+        "sigma_bg0_i00": ("tab:brown", ":"),
+        "b0_sigma_bg0_i00": ("tab:pink", "-."),
+    }
+    active_modes = [m for m in ("77fps", "maxfps_15x15") if any(r.mode == m for r in rows)]
+    if not active_modes:
+        active_modes = ["maxfps_15x15"]
+    x_plot = theta_deg_grid[ok]
+    for fit_name, fit in fits.items():
+        color, ls = variant_styles.get(fit_name, ("0.35", "--"))
+        for mode_name in active_modes:
+            if which == "phi":
+                y_deg = np.degrees(predict_phi_err_rad(r_grid[ok], theta_rad_grid[ok], fit, mode=mode_name))
+            else:
+                y_deg = np.degrees(predict_theta_err_rad(r_grid[ok], theta_rad_grid[ok], fit, mode=mode_name))
 
-        x_plot = theta_deg_grid[ok]
-        ok2 = np.isfinite(x_plot) & np.isfinite(y_deg)
-        if y_max_deg is not None:
-            ok2 = ok2 & (y_deg <= float(y_max_deg))
-        if np.count_nonzero(ok2) < 2:
-            continue
-        x_raw = x_plot[ok2]
-        if x_mapper is None:
-            x_use = x_raw
-        else:
-            x_use = np.asarray([x_mapper(float(v)) for v in x_raw], dtype=np.float64)
-        y_use = y_deg[ok2]
-        order = np.argsort(x_use)
-        ax.plot(x_use[order], y_use[order], color=color, lw=2.0, alpha=0.95, label=label)
+            ok2 = np.isfinite(x_plot) & np.isfinite(y_deg)
+            if y_max_deg is not None:
+                ok2 = ok2 & (y_deg <= float(y_max_deg))
+            if np.count_nonzero(ok2) < 2:
+                continue
+            x_raw = x_plot[ok2]
+            if x_mapper is None:
+                x_use = x_raw
+            else:
+                x_use = np.asarray([x_mapper(float(v)) for v in x_raw], dtype=np.float64)
+            y_use = y_deg[ok2]
+            order = np.argsort(x_use)
+            suffix = "" if len(active_modes) == 1 else f" [{mode_name}]"
+            ax.plot(
+                x_use[order],
+                y_use[order],
+                color=color,
+                lw=(2.2 if fit_name == "combined" else 1.5),
+                ls=ls,
+                alpha=0.95,
+                label=f"{fit_name}{suffix}",
+            )
 
 
 def _draw_overflow_points(ax, rows: list[RodResult], y_attr: str, xlim: tuple[float, float], y_cap: float) -> None:
-    modes = ["77fps", "maxfps_11x11"]
-    colors = {"77fps": "tab:blue", "maxfps_11x11": "tab:orange"}
+    modes = ["77fps", "maxfps_15x15"]
+    colors = {"77fps": "tab:blue", "maxfps_15x15": "tab:orange"}
     for m in modes:
         sub = [
             r
@@ -1299,10 +2124,10 @@ def y_plot_limits(
     if np.any(use):
         theta_rad_grid = np.radians(theta_deg_grid[use])
         r_grid = r_from_theta_hole_fresnel(theta_rad_grid)
-        ok_r = np.isfinite(r_grid) & (r_grid >= 0.0) & (r_grid < THETA_R_MAX)
+        ok_r = np.isfinite(r_grid) & (r_grid >= 0.0) & (r_grid < float(_theta_recon_params()["r_max"]))
         if np.any(ok_r):
             for fit in fits.values():
-                for mode_name in ("77fps", "maxfps_11x11"):
+                for mode_name in ("77fps", "maxfps_15x15"):
                     if which == "phi":
                         y_deg = np.degrees(predict_phi_err_rad(r_grid[ok_r], theta_rad_grid[ok_r], fit, mode=mode_name))
                     else:
@@ -1356,7 +2181,7 @@ def make_plots(
     theta_grid_phi = np.linspace(0.1, 89.9, 1200)
     theta_rad_grid_phi = np.radians(theta_grid_phi)
     r_grid_phi = r_from_theta_hole_fresnel(theta_rad_grid_phi)
-    ok_phi = np.isfinite(r_grid_phi) & (r_grid_phi > 0.0) & (r_grid_phi < THETA_R_MAX)
+    ok_phi = np.isfinite(r_grid_phi) & (r_grid_phi > 0.0) & (r_grid_phi < float(_theta_recon_params()["r_max"]))
     phi_diverge_drawn = False
     if np.any(ok_phi) and fits:
         fit0 = next(iter(fits.values()))
@@ -1400,7 +2225,7 @@ def make_plots(
     if intensity_theta_fit is not None and fits:
         fit0 = next(iter(fits.values()))
         th_grid = np.linspace(0.1, 89.9, 900)
-        for mode_name, color in (("77fps", "tab:blue"), ("maxfps_11x11", "tab:orange")):
+        for mode_name, color in (("77fps", "tab:blue"), ("maxfps_15x15", "tab:orange")):
             y_alt = predict_theta_err_intensity_deg(th_grid, mode_name, fit0, intensity_theta_fit)
             ok_alt = np.isfinite(y_alt)
             if np.count_nonzero(ok_alt) >= 2:
@@ -1411,7 +2236,7 @@ def make_plots(
                     lw=1.6,
                     ls="--",
                     alpha=0.95,
-                    label=f"Intensity-theta fit ({'77fps 15x15 pixels' if mode_name == '77fps' else '1600fps'})",
+                    label=f"Intensity-theta fit ({'77fps 15x15 pixels' if mode_name == '77fps' else 'maxfps 15x15 pixels'})",
                 )
     ax2.set_xlim(*xlim_full)
     ax2.set_ylim(0.0, 10.0)
@@ -1420,7 +2245,7 @@ def make_plots(
     theta_grid = np.linspace(0.1, 89.9, 1200)
     theta_rad_grid = np.radians(theta_grid)
     r_grid = r_from_theta_hole_fresnel(theta_rad_grid)
-    ok = np.isfinite(r_grid) & (r_grid > 0.0) & (r_grid < THETA_R_MAX)
+    ok = np.isfinite(r_grid) & (r_grid > 0.0) & (r_grid < float(_theta_recon_params()["r_max"]))
     theta_diverge_drawn = False
     if np.any(ok) and fits:
         fit0 = next(iter(fits.values()))
@@ -1453,6 +2278,135 @@ def make_plots(
     plt.close(fig2)
 
 
+def _add_irod_theory_curves(
+    ax,
+    rows: list[RodResult],
+    fits: dict[str, IrodFit],
+    which: str,
+) -> np.ndarray:
+    variant_styles = {
+        "combined": ("black", "-"),
+        "b0": ("tab:blue", "--"),
+        "sigma_bg0": ("tab:orange", "--"),
+        "b0_sigma_bg0": ("tab:red", ":"),
+    }
+    best_curve = np.full(0, np.nan, dtype=np.float64)
+    best_theta = np.full(0, np.nan, dtype=np.float64)
+    for fit_name, fit in fits.items():
+        color, ls = variant_styles.get(fit_name, ("0.35", "--"))
+        if which == "phi":
+            x_use, y_use = predict_phi_err_deg_irod(rows, fit)
+        else:
+            x_use, y_use = predict_theta_err_deg_irod(rows, fit)
+        ok = np.isfinite(x_use) & np.isfinite(y_use)
+        if np.count_nonzero(ok) < 2:
+            continue
+        x_ok = x_use[ok]
+        y_ok = y_use[ok]
+        order = np.argsort(x_ok)
+        ax.plot(
+            x_ok[order],
+            y_ok[order],
+            color=color,
+            lw=(2.2 if fit_name == "combined" else 1.5),
+            ls=ls,
+            alpha=0.95,
+            label=fit_name,
+        )
+        if fit_name == "combined":
+            best_theta = x_ok[order]
+            best_curve = y_ok[order]
+    if best_curve.size == 0:
+        return np.full(0, np.nan, dtype=np.float64)
+    return np.vstack([best_theta, best_curve])
+
+
+def make_irod_plots(
+    rows: list[RodResult],
+    out_dir: Path,
+    fits: dict[str, IrodFit],
+    stem_suffix: str = "",
+    title_suffix: str = "",
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    xlim_full = (0.0, 90.0)
+
+    fig1, ax1 = plt.subplots(figsize=(7.2, 4.8), dpi=130)
+    add_scatter_by_mode(
+        ax1,
+        rows,
+        y_attr="phi_err_deg",
+        y_label="phi error (deg, 1-sigma robust)",
+        xlim=xlim_full,
+    )
+    phi_curve = _add_irod_theory_curves(ax1, rows, fits, which="phi")
+    ax1.set_ylim(0.0, 5.0)
+    ax1.set_title(f"Phi Estimation Error vs Theta{title_suffix}")
+    phi_diverge_drawn = False
+    if phi_curve.size:
+        x_phi = phi_curve[0, :]
+        y_phi = phi_curve[1, :]
+        left_phi = np.isfinite(x_phi) & np.isfinite(y_phi) & (y_phi > 5.0) & (x_phi <= 45.0)
+        if np.any(left_phi):
+            left_end_phi = float(np.max(x_phi[left_phi]))
+            ax1.axvspan(
+                0.0,
+                left_end_phi,
+                facecolor="none",
+                hatch="///",
+                edgecolor="0.45",
+                linewidth=0.0,
+                zorder=0,
+            )
+            phi_diverge_drawn = True
+    h1, l1 = ax1.get_legend_handles_labels()
+    if phi_diverge_drawn:
+        h1.append(Patch(facecolor="none", edgecolor="0.45", hatch="///", label="Model error diverges"))
+        l1.append("Model error diverges")
+    ax1.legend(h1, l1, frameon=False, fontsize=8)
+    fig1.tight_layout()
+    fig1.savefig(out_dir / f"phi_error_vs_theta{stem_suffix}.png")
+    plt.close(fig1)
+
+    fig2, ax2 = plt.subplots(figsize=(7.2, 4.8), dpi=130)
+    add_scatter_by_mode(
+        ax2,
+        rows,
+        y_attr="theta_err_deg",
+        y_label="theta error (deg, 1-sigma robust)",
+        xlim=xlim_full,
+    )
+    theta_curve = _add_irod_theory_curves(ax2, rows, fits, which="theta")
+    ax2.set_xlim(*xlim_full)
+    ax2.set_ylim(0.0, 10.0)
+    ax2.set_title(f"Theta Estimation Error vs Theta{title_suffix}")
+    theta_diverge_drawn = False
+    if theta_curve.size:
+        x_th = theta_curve[0, :]
+        y_th = theta_curve[1, :]
+        right_mask = np.isfinite(x_th) & np.isfinite(y_th) & (y_th > 10.0) & (x_th >= 45.0)
+        if np.any(right_mask):
+            right_start = float(np.min(x_th[right_mask]))
+            ax2.axvspan(
+                right_start,
+                90.0,
+                facecolor="none",
+                hatch="///",
+                edgecolor="0.45",
+                linewidth=0.0,
+                zorder=0,
+            )
+            theta_diverge_drawn = True
+    h2, l2 = ax2.get_legend_handles_labels()
+    if theta_diverge_drawn:
+        h2.append(Patch(facecolor="none", edgecolor="0.45", hatch="///", label="Model error diverges"))
+        l2.append("Model error diverges")
+    ax2.legend(h2, l2, frameon=False, fontsize=8)
+    fig2.tight_layout()
+    fig2.savefig(out_dir / f"theta_error_vs_theta{stem_suffix}.png")
+    plt.close(fig2)
+
+
 def make_intensity_theta_method_plot(
     out_dir: Path,
     points: list[dict],
@@ -1466,10 +2420,10 @@ def make_intensity_theta_method_plot(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=130)
-    colors = {"77fps": "tab:blue", "maxfps_11x11": "tab:orange"}
-    labels = {"77fps": "77fps 15x15 pixels", "maxfps_11x11": "1600fps"}
+    colors = {"77fps": "tab:blue", "maxfps_15x15": "tab:orange"}
+    labels = {"77fps": "77fps 15x15 pixels", "maxfps_15x15": "maxfps 15x15 pixels"}
 
-    for mode in ("77fps", "maxfps_11x11"):
+    for mode in ("77fps", "maxfps_15x15"):
         sub = [p for p in points if p["mode"] == mode and np.isfinite(p["theta_deg"]) and np.isfinite(p["theta_err_deg"])]
         if not sub:
             continue
@@ -1482,7 +2436,7 @@ def make_intensity_theta_method_plot(
     s = np.sin(th)
     c = np.cos(th)
     y_model_vals: list[np.ndarray] = []
-    for mode in ("77fps", "maxfps_11x11"):
+    for mode in ("77fps", "maxfps_15x15"):
         if mode == "77fps":
             k_mode = fit_i.k_77
             i_const_mode = fit_i.i_const_77
@@ -1510,8 +2464,8 @@ def make_intensity_theta_method_plot(
     if old_fit is not None:
         theta_rad_grid = np.radians(th_grid)
         r_grid = r_from_theta_hole_fresnel(theta_rad_grid)
-        okr = np.isfinite(r_grid) & (r_grid > 0.0) & (r_grid < THETA_R_MAX)
-        for mode in ("77fps", "maxfps_11x11"):
+        okr = np.isfinite(r_grid) & (r_grid > 0.0) & (r_grid < float(_theta_recon_params()["r_max"]))
+        for mode in ("77fps", "maxfps_15x15"):
             y_old = np.degrees(predict_theta_err_rad(r_grid[okr], theta_rad_grid[okr], old_fit, mode=mode))
             y_all = np.full(th_grid.shape, np.nan, dtype=np.float64)
             y_all[okr] = y_old
@@ -1528,7 +2482,7 @@ def make_intensity_theta_method_plot(
         xmask = (th_grid >= DATA_THETA_MIN_DEG) & (th_grid <= DATA_THETA_MAX_DEG)
         # Recompute robust top bound directly on plotted x-window samples.
         y_window: list[float] = []
-        for mode in ("77fps", "maxfps_11x11"):
+        for mode in ("77fps", "maxfps_15x15"):
             if mode == "77fps":
                 k_mode = fit_i.k_77
                 i_const_mode = fit_i.i_const_77
@@ -1563,6 +2517,236 @@ def make_intensity_theta_method_plot(
     ax.legend(frameon=False, fontsize=8)
     fig.tight_layout()
     fig.savefig(out_dir / f"theta_error_vs_theta_intensity_method{stem_suffix}.png")
+    plt.close(fig)
+
+
+def write_intensity_sin2_json(path: Path, fit: IntensitySin2Fit) -> None:
+    payload = {
+        "model": "brightness_mean = k * sin(theta)^2",
+        "k_77": float(fit.k_77),
+        "k_15": float(fit.k_15),
+        "n_used": int(fit.n_used),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def write_intensity_sin2_no_fit_json(path: Path, n_total: int, reason: str) -> None:
+    payload = {
+        "model": "brightness_mean = k * sin(theta)^2",
+        "fit_available": False,
+        "n_total": int(n_total),
+        "reason": str(reason),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def make_intensity_vs_theta_plot(
+    rows: list[RodResult],
+    out_dir: Path,
+    fit: Optional[IntensitySin2Fit],
+    stem_suffix: str = "",
+) -> None:
+    if not rows:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=130)
+    colors = {"77fps": "tab:blue", "maxfps_15x15": "tab:orange"}
+    labels = {"77fps": "77fps 15x15 pixels", "maxfps_15x15": "maxfps 15x15 pixels"}
+    high_label_drawn = False
+
+    for mode_name in ("77fps", "maxfps_15x15"):
+        sub = [
+            r for r in rows
+            if r.mode == mode_name
+            and np.isfinite(r.theta_deg)
+            and np.isfinite(r.brightness_mean)
+            and (r.brightness_mean >= 0.0)
+        ]
+        if not sub:
+            continue
+        x = np.asarray([r.theta_deg for r in sub], dtype=np.float64)
+        y = np.asarray([r.brightness_mean for r in sub], dtype=np.float64)
+        ax.scatter(x, y, s=20, alpha=0.85, color=colors[mode_name], edgecolors="none", label=labels[mode_name])
+        high98 = [
+            r
+            for r in sub
+            if np.isfinite(r.brightness_p98) and (float(r.brightness_p98) > 50.0)
+        ]
+        if high98:
+            x_high = np.asarray([r.theta_deg for r in high98], dtype=np.float64)
+            y_high = np.asarray([r.brightness_mean for r in high98], dtype=np.float64)
+            ax.scatter(
+                x_high,
+                y_high,
+                s=28,
+                alpha=0.95,
+                color="green",
+                edgecolors="none",
+                label=("p98 > 50" if not high_label_drawn else None),
+            )
+            high_label_drawn = True
+
+    if fit is not None:
+        th_grid = np.linspace(DATA_THETA_MIN_DEG, DATA_THETA_MAX_DEG, 600)
+        s2_grid = np.sin(np.radians(th_grid)) ** 2
+        fit_specs = [
+            ("77fps", fit.k_77, "tab:blue"),
+            ("maxfps_15x15", fit.k_15, "tab:orange"),
+        ]
+        for mode_name, k_fit, color in fit_specs:
+            if np.isfinite(k_fit) and (k_fit > 0.0):
+                ax.plot(
+                    th_grid,
+                    k_fit * s2_grid,
+                    color=color,
+                    lw=2.0,
+                    alpha=0.95,
+                    label=f"k sin^2(theta) fit [{labels[mode_name]}]",
+                )
+
+    ax.set_xlim(DATA_THETA_MIN_DEG, DATA_THETA_MAX_DEG)
+    ax.set_xlabel("theta (deg) [finite-NA cutout from r]")
+    ax.set_ylabel("Mean intensity across recording")
+    ax.set_title("Mean Intensity vs Theta")
+    ax.grid(True, alpha=0.3)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_dir / f"intensity_mean_vs_theta_sin2_fit{stem_suffix}.png")
+    plt.close(fig)
+
+
+def make_intensity_vs_theta_projected_spread_plot(
+    rows: list[RodResult],
+    out_dir: Path,
+    fit: Optional[IntensityProjectedSpreadFit],
+    stem_suffix: str = "",
+    xlim: tuple[float, float] = (0.0, 90.0),
+) -> None:
+    if not rows:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=130)
+    colors = {"77fps": "tab:blue", "maxfps_15x15": "tab:orange"}
+    labels = {"77fps": "77fps 15x15 pixels", "maxfps_15x15": "maxfps 15x15 pixels"}
+    high_label_drawn = False
+
+    for mode_name in ("77fps", "maxfps_15x15"):
+        sub = [
+            r for r in rows
+            if r.mode == mode_name
+            and np.isfinite(r.theta_deg)
+            and np.isfinite(r.brightness_mean)
+            and (r.brightness_mean >= 0.0)
+            and (float(r.theta_deg) >= float(xlim[0]))
+            and (float(r.theta_deg) <= float(xlim[1]))
+        ]
+        if not sub:
+            continue
+        x = np.asarray([r.theta_deg for r in sub], dtype=np.float64)
+        y = np.asarray([r.brightness_mean for r in sub], dtype=np.float64)
+        ax.scatter(x, y, s=20, alpha=0.85, color=colors[mode_name], edgecolors="none", label=labels[mode_name])
+        high98 = [
+            r
+            for r in sub
+            if np.isfinite(r.brightness_p98) and (float(r.brightness_p98) > 50.0)
+        ]
+        if high98:
+            x_high = np.asarray([r.theta_deg for r in high98], dtype=np.float64)
+            y_high = np.asarray([r.brightness_mean for r in high98], dtype=np.float64)
+            ax.scatter(
+                x_high,
+                y_high,
+                s=28,
+                alpha=0.95,
+                color="green",
+                edgecolors="none",
+                label=("p98 > 50" if not high_label_drawn else None),
+            )
+            high_label_drawn = True
+
+    if fit is not None:
+        th_grid = np.linspace(float(xlim[0]), float(xlim[1]), 800)
+        s = np.sin(np.radians(th_grid))
+        s2 = s * s
+        fit_specs = [
+            ("77fps", fit.k_77, fit.q_77, "tab:blue"),
+            ("maxfps_15x15", fit.k_15, fit.q_15, "tab:orange"),
+        ]
+        for mode_name, k_fit, q_fit, color in fit_specs:
+            if np.isfinite(k_fit) and np.isfinite(q_fit) and (k_fit > 0.0) and (q_fit >= 0.0):
+                y_fit = k_fit * s2 / (1.0 + (q_fit * s))
+                ax.plot(
+                    th_grid,
+                    y_fit,
+                    color=color,
+                    lw=2.1,
+                    alpha=0.95,
+                    label=f"projected-spread fit [{labels[mode_name]}]",
+                )
+
+    ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    ax.set_xlabel("theta (deg) [finite-NA cutout from r]")
+    ax.set_ylabel("Mean intensity across recording")
+    ax.set_title("Mean Intensity vs Theta with Projected-Spreading Fit")
+    ax.grid(True, alpha=0.3)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_dir / f"intensity_mean_vs_theta_projected_spread_fit{stem_suffix}.png")
+    plt.close(fig)
+
+
+def make_intensity_vs_r_plot(
+    rows: list[RodResult],
+    out_dir: Path,
+    stem_suffix: str = "",
+) -> None:
+    if not rows:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=130)
+    colors = {"77fps": "tab:blue", "maxfps_15x15": "tab:orange"}
+    labels = {"77fps": "77fps 15x15 pixels", "maxfps_15x15": "maxfps 15x15 pixels"}
+    high_label_drawn = False
+
+    for mode_name in ("77fps", "maxfps_15x15"):
+        sub = [
+            r for r in rows
+            if r.mode == mode_name
+            and np.isfinite(r.r_mean)
+            and np.isfinite(r.brightness_mean)
+            and (r.brightness_mean >= 0.0)
+        ]
+        if not sub:
+            continue
+        x = np.asarray([r.r_mean for r in sub], dtype=np.float64)
+        y = np.asarray([r.brightness_mean for r in sub], dtype=np.float64)
+        ax.scatter(x, y, s=20, alpha=0.85, color=colors[mode_name], edgecolors="none", label=labels[mode_name])
+        high98 = [
+            r
+            for r in sub
+            if np.isfinite(r.brightness_p98) and (float(r.brightness_p98) > 50.0)
+        ]
+        if high98:
+            x_high = np.asarray([r.r_mean for r in high98], dtype=np.float64)
+            y_high = np.asarray([r.brightness_mean for r in high98], dtype=np.float64)
+            ax.scatter(
+                x_high,
+                y_high,
+                s=28,
+                alpha=0.95,
+                color="green",
+                edgecolors="none",
+                label=("p98 > 50" if not high_label_drawn else None),
+            )
+            high_label_drawn = True
+
+    ax.set_xlabel("r mean")
+    ax.set_ylabel("Mean intensity across recording")
+    ax.set_title("Mean Intensity vs r")
+    ax.grid(True, alpha=0.3)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_dir / f"intensity_mean_vs_r{stem_suffix}.png")
     plt.close(fig)
 
 
@@ -1793,9 +2977,9 @@ def make_theta_comparison_two_datasets_plot(
 
     groups = [
         ("40nm", "77fps", "tab:blue", "40nm 77fps 15x15"),
-        ("40nm", "maxfps_11x11", "tab:orange", "40nm 1600fps 11x11px"),
+        ("40nm", "maxfps_15x15", "tab:orange", "40nm maxfps 15x15px"),
         ("25nm", "77fps", "tab:green", "25nm 77fps 15x15"),
-        ("25nm", "maxfps_11x11", "tab:red", "25nm 1600fps 11x11px"),
+        ("25nm", "maxfps_15x15", "tab:red", "25nm maxfps 15x15px"),
     ]
 
     rows_map = {"40nm": rows_old, "25nm": rows_new}
@@ -1820,7 +3004,7 @@ def make_theta_comparison_two_datasets_plot(
     th_rad = np.radians(th_grid)
     r_grid = r_from_theta_hole_fresnel(th_rad)
     dth = np.abs(dtheta_dr_hole_fresnel(r_grid))
-    ok = np.isfinite(dth) & np.isfinite(r_grid) & (r_grid > 0.0) & (r_grid < THETA_R_MAX)
+    ok = np.isfinite(dth) & np.isfinite(r_grid) & (r_grid > 0.0) & (r_grid < float(_theta_recon_params()["r_max"]))
 
     best_curve = np.full(th_grid.shape, np.nan, dtype=np.float64)
     for ds_name, mode_name, color, _ in groups:
@@ -1878,9 +3062,9 @@ def make_phi_comparison_two_datasets_plot(
     fig, ax = plt.subplots(figsize=(8.4, 5.2), dpi=130)
     groups = [
         ("40nm", "77fps", "tab:blue", "40nm 77fps 15x15"),
-        ("40nm", "maxfps_11x11", "tab:orange", "40nm 1600fps 11x11px"),
+        ("40nm", "maxfps_15x15", "tab:orange", "40nm maxfps 15x15px"),
         ("25nm", "77fps", "tab:green", "25nm 77fps 15x15"),
-        ("25nm", "maxfps_11x11", "tab:red", "25nm 1600fps 11x11px"),
+        ("25nm", "maxfps_15x15", "tab:red", "25nm maxfps 15x15px"),
     ]
     rows_map = {"40nm": rows_old, "25nm": rows_new}
     xlim = (0.0, 90.0)
@@ -1904,7 +3088,7 @@ def make_phi_comparison_two_datasets_plot(
     th_grid = np.linspace(xlim[0], xlim[1], 800)
     th_rad = np.radians(th_grid)
     r_grid = r_from_theta_hole_fresnel(th_rad)
-    ok = np.isfinite(r_grid) & (r_grid > 0.0) & (r_grid < THETA_R_MAX)
+    ok = np.isfinite(r_grid) & (r_grid > 0.0) & (r_grid < float(_theta_recon_params()["r_max"]))
     best_curve = np.full(th_grid.shape, np.nan, dtype=np.float64)
 
     for ds_name, mode_name, color, _ in groups:
@@ -1972,13 +3156,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--good-dir-first",
         type=Path,
-        default=Path.cwd() / "stationary_rod_dataset" / "good first try",
+        default=Path.cwd() / STATIONARY_DATASET_DIRNAME / "good first try",
         help="First directory containing accepted stationary rod folders.",
     )
     p.add_argument(
         "--good-dir-second",
         type=Path,
-        default=Path.cwd() / "stationary_rod_dataset" / "good",
+        default=Path.cwd() / STATIONARY_DATASET_DIRNAME / "good",
         help="Second directory containing accepted stationary rod folders.",
     )
     p.add_argument(
@@ -2011,11 +3195,25 @@ def parse_args() -> argparse.Namespace:
         default=5.0,
         help="Bandwidth (deg) for local-theta density weighting in theory-parameter fit.",
     )
+    p.add_argument(
+        "--intensity-source",
+        choices=["theoretical", "rod"],
+        default="theoretical",
+        help="Use either global theoretical I(theta) or per-rod measured intensity I_rod in the error model.",
+    )
+    p.add_argument(
+        "--theta-medium",
+        choices=sorted(THETA_RECON_MODELS.keys()),
+        default=THETA_RECON_DEFAULT_KEY,
+        help="Finite-NA theta(r) medium model to use. Default: water",
+    )
     return p.parse_args()
 
 
 def main() -> None:
+    global _THETA_RECON_ACTIVE_KEY
     args = parse_args()
+    _THETA_RECON_ACTIVE_KEY = str(args.theta_medium)
     good_dirs: list[Path] = [args.good_dir_first, args.good_dir_second]
     valid_good_dirs = [d for d in good_dirs if d.exists() and d.is_dir()]
     if not valid_good_dirs:
@@ -2027,9 +3225,9 @@ def main() -> None:
     if args.mode == "77":
         modes = ["77fps"]
     elif args.mode == "max":
-        modes = ["maxfps_11x11"]
+        modes = ["maxfps_15x15"]
     else:
-        modes = ["77fps", "maxfps_11x11"]
+        modes = ["77fps", "maxfps_15x15"]
 
     rod_dirs: list[Path] = []
     for gd in valid_good_dirs:
@@ -2071,15 +3269,87 @@ def main() -> None:
     # Use all available rows in the requested theta range (no per-bin best-N filtering).
     bin_counts: list[tuple[str, float, float, int]] = []
 
+    if args.intensity_source == "rod":
+        fits_irod: dict[str, IrodFit] = {}
+        for fit_name, fit_kwargs in constrained_fit_specs_irod():
+            fit = fit_irod_noise_model(
+                rows,
+                theta_weight_bandwidth_deg=float(args.theta_weight_bandwidth_deg),
+                use_density_weight=True,
+                **fit_kwargs,
+            )
+            if fit is not None:
+                fit.fit_name = fit_name
+                fits_irod[fit_name] = fit
+        if not fits_irod:
+            raise SystemExit("No valid I_rod fits could be computed.")
+
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        write_csv(args.out_dir / "angle_error_summary.csv", rows)
+        write_irod_fit_json(args.out_dir / "theory_fit_params.json", fits_irod)
+        make_irod_plots(rows_all, args.out_dir, fits_irod)
+        intensity_sin2_fit = fit_intensity_sin2_model(rows)
+        make_intensity_vs_theta_plot(rows, args.out_dir, intensity_sin2_fit)
+        make_intensity_vs_r_plot(rows, args.out_dir)
+        if intensity_sin2_fit is not None:
+            write_intensity_sin2_json(args.out_dir / "intensity_vs_theta_sin2_fit.json", intensity_sin2_fit)
+        else:
+            write_intensity_sin2_no_fit_json(
+                args.out_dir / "intensity_vs_theta_sin2_fit.json",
+                n_total=len(rows),
+                reason="Insufficient rods with valid brightness_mean values for sin^2(theta) fit.",
+            )
+
+        print("Method:")
+        print("- Intensity source: per-rod measured mean intensity I_rod from each saved 15x15 ROI stack.")
+        print("- Raw per-frame trace is x(t), y(t) from saved xy_series.")
+        print("- r(t)=sqrt(x(t)^2+y(t)^2), then theta(t) via user formula:")
+        print("  theta=asin(sqrt((0.1866*r)/(0.5577-0.4216*r))) for 0<=r<0.9170; if r>=0.9170, theta is set to 90 deg.")
+        print("- Data errors shown in scatter:")
+        print("  theta_error = 0.5*(P84-P16) of theta(t) per rod.")
+        print("  phi_error = 0.5*(P84-P16) of wrapped pi-periodic phi residuals per rod.")
+        print("- Theoretical model assumptions:")
+        print("  1) Rod is stationary; fluctuations are measurement noise in x,y.")
+        print("  2) x and y noise are independent, zero-mean, isotropic per frame.")
+        print("  3) I_rod is the measured mean raw intensity for that rod, not a global function of theta.")
+        print("  4) sigma_xy^2=(a/I_rod + b^2/2 + 2*sigma_bg^2/I_rod^2)/N_like, with N_like fitted freely.")
+        print("  5) No extra phi-jitter floor is used.")
+        print("- Error propagation used:")
+        print("  phi=0.5*atan2(y,x) => sigma_phi ~= sigma_xy/(2r).")
+        print("  theta=theta(r), r=sqrt(x^2+y^2) using the active finite-NA cutout model.")
+        print("- Selection before fitting/plotting:")
+        print(f"  Using theta range {DATA_THETA_MIN_DEG:.0f}-{DATA_THETA_MAX_DEG:.0f} deg.")
+        print(
+            "  Removing phi-vs-theta anomalies: "
+            f"(theta>{PHI_OUTLIER_HIGH_THETA_DEG:.0f} and phi_error>{PHI_OUTLIER_HIGH_ERR_DEG:.1f}) or "
+            f"(theta<{PHI_OUTLIER_LOW_THETA_DEG:.0f} and phi_error<{PHI_OUTLIER_LOW_ERR_DEG:.1f})."
+        )
+        print(f"  Removed {n_removed_anom} rows by this anomaly rule.")
+        for fit_name, fit in fits_irod.items():
+            print(
+                f"Fit[{fit_name}]: a={fit.a_param:.6g}, b={fit.b_param:.6g}, "
+                f"sigma_bg={fit.sigma_bg:.6g}, N_like={fit.n_like:.6g}, n_used={fit.n_used}"
+            )
+        if intensity_sin2_fit is not None:
+            print(
+                f"IntensityFit[maxfps_15x15]: k={intensity_sin2_fit.k_15:.6g} in mean-intensity(theta)=k*sin^2(theta), "
+                f"n_used={intensity_sin2_fit.n_used}"
+            )
+        else:
+            print("IntensityFit[maxfps_15x15]: no fit, insufficient rods with valid brightness_mean values.")
+        return
+
     fits: dict[str, ModeFit] = {}
-    fit = fit_noise_model_for_mode(
-        rows,
-        None,
-        theta_weight_bandwidth_deg=float(args.theta_weight_bandwidth_deg),
-        use_density_weight=True,
-    )
-    if fit is not None:
-        fits["combined"] = fit
+    for fit_name, fit_kwargs in constrained_fit_specs():
+        fit = fit_noise_model_for_mode(
+            rows,
+            None,
+            theta_weight_bandwidth_deg=float(args.theta_weight_bandwidth_deg),
+            use_density_weight=True,
+            **fit_kwargs,
+        )
+        if fit is not None:
+            fits[fit_name] = fit
     intensity_fit: Optional[IntensityThetaFit] = None
     intensity_ext_fit: Optional[IntensityThetaExtremaFit] = None
     intensity_err_fit: Optional[IntensityThetaErrorFit] = None
@@ -2094,14 +3364,16 @@ def main() -> None:
     )
     if rows_b:
         fits_b: dict[str, ModeFit] = {}
-        fit_b = fit_noise_model_for_mode(
-            rows_b,
-            None,
-            theta_weight_bandwidth_deg=float(args.theta_weight_bandwidth_deg),
-            use_density_weight=True,
-        )
-        if fit_b is not None:
-            fits_b["combined"] = fit_b
+        for fit_name, fit_kwargs in constrained_fit_specs():
+            fit_b = fit_noise_model_for_mode(
+                rows_b,
+                None,
+                theta_weight_bandwidth_deg=float(args.theta_weight_bandwidth_deg),
+                use_density_weight=True,
+                **fit_kwargs,
+            )
+            if fit_b is not None:
+                fits_b[fit_name] = fit_b
         if not fits_b:
             fits_b = dict(fits)
         write_csv(args.out_dir / "angle_error_summary_brightness_matched.csv", rows_b)
@@ -2116,14 +3388,16 @@ def main() -> None:
             title_suffix=f" (exclude dimmest {100.0*float(args.exclude_dimmest_frac):.0f}%)",
         )
 
+    fit_shared_2k: Optional[SharedNoiseTwoKFit] = None
+
     # Final cross-dataset comparison:
-    # - 40nm: stationary_rod_dataset/40nm good/good
-    # - 25nm: stationary_rod_dataset/good
+    # - 40nm: dedicated 40nm precision-vs-exposure folder
+    # - 25nm: dated stationary_rod_dataset_2026-05-25/good
     ds40_dirs = [
-        Path.cwd() / "stationary_rod_dataset" / "40nm good" / "good",
+        Path.cwd() / PRECISION_VS_EXPOSURE_40NM_DIRNAME / "good",
     ]
     ds25_dirs = [
-        Path.cwd() / "stationary_rod_dataset" / "good",
+        Path.cwd() / STATIONARY_DATASET_DIRNAME / "good",
     ]
     rows_40_all = _collect_rows_from_good_dirs(ds40_dirs, modes, int(args.min_frames))
     rows_25_all = _collect_rows_from_good_dirs(ds25_dirs, modes, int(args.min_frames))
@@ -2187,14 +3461,16 @@ def main() -> None:
         and (0.0 <= float(r.theta_deg) < 10.0)
     ]
 
-    fit_shared_2k = fit_shared_noise_two_datasets(
-        rows_40_fit,
-        rows_25_fit,
-        theta_weight_bandwidth_deg=float(args.theta_weight_bandwidth_deg),
-        use_density_weight=True,
-    )
-    make_theta_comparison_two_datasets_plot(args.out_dir, rows_40_theta, rows_25_theta, fit_shared_2k)
-    make_phi_comparison_two_datasets_plot(args.out_dir, rows_40_phi, rows_25_phi, fit_shared_2k)
+    if rows_40_fit and rows_25_fit:
+        fit_shared_2k = fit_shared_noise_two_datasets(
+            rows_40_fit,
+            rows_25_fit,
+            theta_weight_bandwidth_deg=float(args.theta_weight_bandwidth_deg),
+            use_density_weight=True,
+        )
+        if fit_shared_2k is not None:
+            make_theta_comparison_two_datasets_plot(args.out_dir, rows_40_theta, rows_25_theta, fit_shared_2k)
+            make_phi_comparison_two_datasets_plot(args.out_dir, rows_40_phi, rows_25_phi, fit_shared_2k)
 
     print("Method:")
     print("- Raw per-frame trace is x(t), y(t) from saved xy_series.")
@@ -2206,15 +3482,15 @@ def main() -> None:
     print("- Theoretical model assumptions:")
     print("  1) Rod is stationary; fluctuations are measurement noise in x,y.")
     print("  2) x and y noise are independent, zero-mean, isotropic per frame.")
-    print("  3) I(theta)=sigma_bg^2 + K*sin(theta)^2.")
+    print("  3) I(theta)=I0 + K*sin(theta)^2.")
     print("  4) sigma_xy^2(theta,mode)=(a/I + b^2/2 + 2*sigma_bg^2/I^2)/Npix(mode),")
-    print("     with Npix=121 (11x11) or 225 (15x15).")
+    print("     with Npix=225 (15x15) for the current stationary maxfps dataset.")
     print("  5) No extra phi-jitter floor is used.")
     print("- Error propagation used:")
     print("  phi=0.5*atan2(y,x) => sigma_phi ~= sigma_xy/(2r).")
-    print("  theta=theta(r), r=sqrt(x^2+y^2) => sigma_theta ~= |dtheta/dr|*sigma_xy.")
+    print("  theta=theta(r), r=sqrt(x^2+y^2) using the active finite-NA cutout model.")
     print("- Fit strategy:")
-    print("  a, b, sigma_bg, K are fit jointly from BOTH theta-error and phi-error,")
+    print("  a, b, sigma_bg, I0, K are fit jointly from BOTH theta-error and phi-error,")
     print("  via weighted least-squares in variance-space,")
     print("  with weights = inverse local theta-density (Gaussian neighborhood) to reduce bias from crowded theta regions,")
     print("  then the same fitted parameters predict both theta-error and phi-error curves over 0-90 deg.")
@@ -2233,14 +3509,14 @@ def main() -> None:
 
     for mode, fit in fits.items():
         roi_desc = (
-            "mixed(11x11,15x15)"
+            "mixed"
             if fit.mode == "combined"
             else f"{roi_pixels_for_mode(f.mode):.0f}"
         )
         print(
             f"Fit[{mode}]: a={fit.a_param:.6g}, b={fit.b_param:.6g}, "
-            f"sigma_bg={fit.sigma_bg:.6g}, K={fit.k_intensity:.6g}, "
-            f"roi_pixels={roi_desc}, "
+            f"sigma_bg={fit.sigma_bg:.6g}, I0={fit.i0_intensity:.6g}, K={fit.k_intensity:.6g}, "
+            f"N_like={fit.n_like:.6g}, roi_pixels={roi_desc}, "
             f"n_used={fit.n_used}"
         )
     if fit_shared_2k is not None:
@@ -2280,8 +3556,9 @@ def main() -> None:
     print(f"Saved: {args.out_dir / 'theta_error_vs_theta.png'}")
     print(f"Saved: {args.out_dir / 'angle_error_summary.csv'}")
     print(f"Saved: {args.out_dir / 'theory_fit_params.json'}")
-    print(f"Saved: {args.out_dir / 'theta_error_vs_theta_40nm_25nm_sharedK.png'}")
-    print(f"Saved: {args.out_dir / 'phi_error_vs_theta_40nm_25nm_sharedK.png'}")
+    if fit_shared_2k is not None:
+        print(f"Saved: {args.out_dir / 'theta_error_vs_theta_40nm_25nm_sharedK.png'}")
+        print(f"Saved: {args.out_dir / 'phi_error_vs_theta_40nm_25nm_sharedK.png'}")
     if rows_b:
         print(
             f"Brightness subset: n={len(rows_b)} points, mean={mu_b:.6g}, threshold={thr_b:.6g}"
@@ -2296,3 +3573,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
